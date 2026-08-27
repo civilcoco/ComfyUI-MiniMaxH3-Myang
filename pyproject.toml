@@ -1,0 +1,25 @@
+[project]
+name = "minimax-h3-myang"
+version = "0.1.0"
+description = "Long-video directing, native temporal anchors, media-aware prompting and AV stitching for MiniMax H3 in ComfyUI."
+authors = [{ name = "沐阳Myang" }]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Repository = "https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang"
+Documentation = "https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang#readme"
+"Bug Tracker" = "https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang/issues"
+
+[tool.comfy]
+PublisherId = "civilcoco"
+DisplayName = "ComfyUI MiniMax H3 Myang"

@@ -1,0 +1,1147 @@
+{
+  "id": "myang-h3-director-example",
+  "revision": 0,
+  "last_node_id": 8,
+  "last_link_id": 9,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "H3Loader",
+      "pos": [
+        30,
+        30
+      ],
+      "size": [
+        440.4168477170948,
+        207.62126944869755
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "ref2va_model",
+          "name": "ref2va_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "ref2va_model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "fl2va_model",
+          "name": "fl2va_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "fl2va_model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "text_encoder",
+          "name": "text_encoder",
+          "type": "COMBO",
+          "widget": {
+            "name": "text_encoder"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "video_vae",
+          "name": "video_vae",
+          "type": "COMBO",
+          "widget": {
+            "name": "video_vae"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "audio_vae",
+          "name": "audio_vae",
+          "type": "COMBO",
+          "widget": {
+            "name": "audio_vae"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "weight_dtype",
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "weight_dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "h3",
+          "name": "h3",
+          "type": "MYANG_H3",
+          "links": [
+            1,
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "H3Loader",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        },
+        "myang_widget_names": [
+          "ref2va_model",
+          "fl2va_model",
+          "text_encoder",
+          "video_vae",
+          "audio_vae",
+          "weight_dtype"
+        ]
+      },
+      "widgets_values": [
+        "minimax\\minimax_h3_ref2va_int8_convrot.safetensors",
+        "minimax\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "MiniMax-H3\\qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "MiniMax-H3\\minimax_h3_video_vae_fp16.safetensors",
+        "MiniMax-H3\\minimax_h3_audio_vae_fp32.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "ref2va_model": "minimax\\minimax_h3_ref2va_int8_convrot.safetensors",
+        "fl2va_model": "minimax\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "text_encoder": "MiniMax-H3\\qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+        "video_vae": "MiniMax-H3\\minimax_h3_video_vae_fp16.safetensors",
+        "audio_vae": "MiniMax-H3\\minimax_h3_audio_vae_fp32.safetensors",
+        "weight_dtype": "default"
+      },
+      "title": "① H3 双模型加载器"
+    },
+    {
+      "id": 2,
+      "type": "H3Model",
+      "pos": [
+        500,
+        30
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "h3",
+          "name": "h3",
+          "type": "MYANG_H3",
+          "link": 1
+        },
+        {
+          "localized_name": "kind",
+          "name": "kind",
+          "type": "COMBO",
+          "widget": {
+            "name": "kind"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            3,
+            4
+          ]
+        }
+      ],
+      "title": "① Ref2VA 基模（一采 + 二采）",
+      "properties": {
+        "Node name for S&R": "H3Model",
+        "myang_widget_names": [
+          "kind"
+        ],
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.5.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "ref2va"
+      ],
+      "widgets_values_named": {
+        "kind": "ref2va"
+      }
+    },
+    {
+      "id": 3,
+      "type": "KSamplerSelect",
+      "pos": [
+        500,
+        150
+      ],
+      "size": [
+        444,
+        62
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "采样器名称",
+          "name": "sampler_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "采样器",
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "KSamplerSelect",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "euler"
+      ],
+      "widgets_values_named": {
+        "sampler_name": "euler"
+      },
+      "color": "#232",
+      "bgcolor": "#353",
+      "title": "① 一采采样器"
+    },
+    {
+      "id": 4,
+      "type": "H3Director",
+      "pos": [
+        970,
+        30
+      ],
+      "size": [
+        760,
+        980
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "h3",
+          "type": "MYANG_H3",
+          "link": 2
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 3
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 5
+        },
+        {
+          "name": "source_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "source_mode"
+          }
+        },
+        {
+          "name": "timeline_json",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "timeline_json"
+          }
+        },
+        {
+          "name": "script_fallback",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "script_fallback"
+          }
+        },
+        {
+          "name": "total_seconds",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "total_seconds"
+          }
+        },
+        {
+          "name": "segment_seconds",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "segment_seconds"
+          }
+        },
+        {
+          "name": "llm_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "llm_enabled"
+          }
+        },
+        {
+          "name": "llm_service",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "llm_service"
+          }
+        },
+        {
+          "name": "task_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "task_mode"
+          }
+        },
+        {
+          "name": "resolution",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "resolution"
+          }
+        },
+        {
+          "name": "aspect_ratio",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "aspect_ratio"
+          }
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "width"
+          }
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "height"
+          }
+        },
+        {
+          "name": "steps",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "steps"
+          }
+        },
+        {
+          "name": "denoise",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "denoise"
+          }
+        },
+        {
+          "name": "scheduler",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "scheduler"
+          }
+        },
+        {
+          "name": "noise_seed",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "noise_seed"
+          }
+        },
+        {
+          "name": "context_length",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "context_length"
+          }
+        },
+        {
+          "name": "ref_image_size",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "ref_image_size"
+          }
+        },
+        {
+          "name": "二采开启",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "二采开启"
+          }
+        },
+        {
+          "name": "二采模式",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采模式"
+          }
+        },
+        {
+          "name": "二采分辨率",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采分辨率"
+          }
+        },
+        {
+          "name": "二采自定义宽",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "二采自定义宽"
+          }
+        },
+        {
+          "name": "二采自定义高",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "二采自定义高"
+          }
+        },
+        {
+          "name": "二采步数",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "二采步数"
+          }
+        },
+        {
+          "name": "二采重绘幅度",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "二采重绘幅度"
+          }
+        },
+        {
+          "name": "二采调度器",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采调度器"
+          }
+        },
+        {
+          "name": "二采采样器",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采采样器"
+          }
+        },
+        {
+          "name": "二采放大方式",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采放大方式"
+          }
+        },
+        {
+          "name": "二采分块帧数",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "二采分块帧数"
+          }
+        },
+        {
+          "name": "二采Latent模型",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采Latent模型"
+          }
+        },
+        {
+          "name": "二采精度",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采精度"
+          }
+        },
+        {
+          "name": "二采时间分块",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "二采时间分块"
+          }
+        },
+        {
+          "name": "二采轮数",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "二采轮数"
+          }
+        },
+        {
+          "name": "二采种子策略",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "二采种子策略"
+          }
+        },
+        {
+          "name": "save_segments",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "save_segments"
+          }
+        },
+        {
+          "name": "segment_prefix",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "segment_prefix"
+          }
+        },
+        {
+          "name": "save_raw_segments",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "save_raw_segments"
+          }
+        },
+        {
+          "name": "script",
+          "type": "STRING",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "media",
+          "type": "MINIMAX_H3_MEDIA",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_video",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_audio",
+          "type": "AUDIO",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "二采模型",
+          "type": "MODEL",
+          "link": 4,
+          "shape": 7
+        },
+        {
+          "name": "二采设置",
+          "type": "MYANG_H3_DETAIL",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "Turbo联合模型",
+          "type": "MODEL",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            6
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "plan_json",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "title": "② Myang H3 导演台 · 分镜 / 素材 / 二采",
+      "properties": {
+        "Node name for S&R": "H3Director",
+        "myang_widget_names": [
+          "source_mode",
+          "timeline_json",
+          "script_fallback",
+          "total_seconds",
+          "segment_seconds",
+          "llm_enabled",
+          "llm_service",
+          "task_mode",
+          "resolution",
+          "aspect_ratio",
+          "width",
+          "height",
+          "steps",
+          "denoise",
+          "scheduler",
+          "noise_seed",
+          "__control_after_generate",
+          "context_length",
+          "ref_image_size",
+          "二采开启",
+          "二采模式",
+          "二采分辨率",
+          "二采自定义宽",
+          "二采自定义高",
+          "二采步数",
+          "二采重绘幅度",
+          "二采调度器",
+          "二采采样器",
+          "二采放大方式",
+          "二采分块帧数",
+          "二采Latent模型",
+          "二采精度",
+          "二采时间分块",
+          "二采轮数",
+          "二采种子策略",
+          "save_segments",
+          "segment_prefix",
+          "save_raw_segments"
+        ]
+      },
+      "widgets_values": [
+        "导演台分镜卡（手动逐镜头）",
+        "{\"version\": 2, \"shots\": [{\"id\": \"shot_1\", \"enabled\": true, \"duration_seconds\": 5, \"brief\": \"镜头 1\", \"prompt\": \"电影感镜头，主体自然运动，光影细腻，画面稳定，无字幕。\", \"asset_mode\": \"仅本镜头\", \"assets\": []}]}",
+        "",
+        60.0,
+        10.0,
+        false,
+        "未配置 LLM 服务",
+        "纯生成（不用参考视频）",
+        "480P",
+        "16:9",
+        864,
+        480,
+        25,
+        1.0,
+        "simple",
+        0,
+        "fixed",
+        "22",
+        "匹配生成分辨率",
+        false,
+        "放大 + 二采（推荐）",
+        "832P",
+        1664,
+        928,
+        4,
+        0.2,
+        "beta",
+        "res_multistep",
+        "neural_3d (神经3D Latent放大·推荐)",
+        4,
+        "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+        "fp16（推荐·省显存）",
+        16,
+        1,
+        "每轮沿用同一种子",
+        true,
+        "video/H3_导演台",
+        false
+      ],
+      "widgets_values_named": {
+        "source_mode": "导演台分镜卡（手动逐镜头）",
+        "timeline_json": "{\"version\": 2, \"shots\": [{\"id\": \"shot_1\", \"enabled\": true, \"duration_seconds\": 5, \"brief\": \"镜头 1\", \"prompt\": \"电影感镜头，主体自然运动，光影细腻，画面稳定，无字幕。\", \"asset_mode\": \"仅本镜头\", \"assets\": []}]}",
+        "script_fallback": "",
+        "total_seconds": 60.0,
+        "segment_seconds": 10.0,
+        "llm_enabled": false,
+        "llm_service": "未配置 LLM 服务",
+        "task_mode": "纯生成（不用参考视频）",
+        "resolution": "480P",
+        "aspect_ratio": "16:9",
+        "width": 864,
+        "height": 480,
+        "steps": 25,
+        "denoise": 1.0,
+        "scheduler": "simple",
+        "noise_seed": 0,
+        "__control_after_generate": "fixed",
+        "context_length": "22",
+        "ref_image_size": "匹配生成分辨率",
+        "二采开启": false,
+        "二采模式": "放大 + 二采（推荐）",
+        "二采分辨率": "832P",
+        "二采自定义宽": 1664,
+        "二采自定义高": 928,
+        "二采步数": 4,
+        "二采重绘幅度": 0.2,
+        "二采调度器": "beta",
+        "二采采样器": "res_multistep",
+        "二采放大方式": "neural_3d (神经3D Latent放大·推荐)",
+        "二采分块帧数": 4,
+        "二采Latent模型": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+        "二采精度": "fp16（推荐·省显存）",
+        "二采时间分块": 16,
+        "二采轮数": 1,
+        "二采种子策略": "每轮沿用同一种子",
+        "save_segments": true,
+        "segment_prefix": "video/H3_导演台",
+        "save_raw_segments": false
+      },
+      "color": "#17324d",
+      "bgcolor": "#1d4263"
+    },
+    {
+      "id": 5,
+      "type": "CreateVideo",
+      "pos": [
+        1790,
+        80
+      ],
+      "size": [
+        225.90469861565725,
+        102
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "images",
+          "localized_name": "图像",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 6
+        },
+        {
+          "label": "audio",
+          "localized_name": "音频",
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 7
+        },
+        {
+          "label": "fps",
+          "localized_name": "帧率",
+          "name": "fps",
+          "type": "FLOAT",
+          "widget": {
+            "name": "fps"
+          },
+          "link": 8
+        },
+        {
+          "label": "bit_depth",
+          "localized_name": "bit_depth",
+          "name": "bit_depth",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "bit_depth"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "VIDEO",
+          "localized_name": "视频",
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "③ 合成导演台成片",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.0",
+        "Node name for S&R": "CreateVideo",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        },
+        "widget_ue_connectable": {
+          "fps": true,
+          "bit_depth": true
+        }
+      },
+      "widgets_values": [
+        24,
+        8
+      ],
+      "widgets_values_named": {
+        "fps": 24,
+        "bit_depth": 8
+      }
+    },
+    {
+      "id": 6,
+      "type": "SaveVideo",
+      "pos": [
+        1790,
+        240
+      ],
+      "size": [
+        532.4216788387865,
+        150
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "video",
+          "localized_name": "视频",
+          "name": "video",
+          "type": "VIDEO",
+          "link": 9
+        },
+        {
+          "label": "filename_prefix",
+          "localized_name": "文件名前缀",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "label": "format",
+          "localized_name": "格式",
+          "name": "format",
+          "type": "COMBO",
+          "widget": {
+            "name": "format"
+          },
+          "link": null
+        },
+        {
+          "label": "codec",
+          "localized_name": "编码器",
+          "name": "codec",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "codec"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "codec.encoding",
+          "name": "codec.encoding",
+          "shape": 7,
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "codec.encoding"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "video_url",
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "links": []
+        },
+        {
+          "label": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "links": []
+        }
+      ],
+      "title": "③ 保存导演台成片",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.0",
+        "Node name for S&R": "SaveVideo",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        },
+        "widget_ue_connectable": {
+          "codec": true,
+          "filename_prefix": true,
+          "format": true
+        }
+      },
+      "widgets_values": [
+        "video/H3_导演台_成片",
+        "mp4",
+        "h264",
+        "auto"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "video/H3_长视频_成片",
+        "format": "mp4",
+        "codec": "h264",
+        "codec.encoding": "auto"
+      }
+    },
+    {
+      "id": 7,
+      "type": "MarkdownNote",
+      "pos": [
+        30,
+        330
+      ],
+      "size": [
+        870,
+        590
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "使用说明",
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "## Myang H3 导演台工作流\n\n1. 在导演台每张镜头卡中直接添加图片、视频和音频。\n2. 二采默认关闭；展开导演台里的二采面板即可开启。\n3. 『二采模型』已接 Ref2VA 基模；如果接 Turbo，仍保留这里的基模线。\n4. 开启『同时保存二采前分段』后，会同时输出原始一采分段与二采分段。\n5. 示例安装没有独立 fl2va 时，加载器的 fl2va 槽暂用已安装模型占位；需要纯 FL2VA/T2VA 时请换成对应模型。"
+      ],
+      "widgets_values_named": {
+        "text": "## Model Links\n[🤗 Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)\n\n**vae**\n\n- [minimax_h3_video_vae_fp16.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors)\n- [minimax_h3_audio_vae_fp32.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors)\n- [Kijai's int8 convrot video vae](https://huggingface.co/Kijai/MiniMax-H3-experimental/blob/main/minimax_h3_video_vae_int8_convrot.safetensors)\n\n**diffusion_models**\n\n- [minimax_h3_ref2va_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors)\n- [minimax_h3_fl2va_pruned_int8_convrot.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors)\n\n**text_encoders**\n\n- [qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors](https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors)\n\n\n## Model Storage Location\n\n```\n📂 ComfyUI/\n├── 📂 models/\n│   ├── 📂 vae/\n│   │   ├── minimax_h3_video_vae_fp16.safetensors\n│   │   └── minimax_h3_audio_vae_fp32.safetensors\n│   ├── 📂 diffusion_models/\n│   │   └── minimax_h3_ref2va_pruned_int8_convrot.safetensors\n│   └── 📂 text_encoders/\n│       └── qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors\n```\n\n## Report Issue\n\nNote: Please update ComfyUI first ([guide](https://docs.comfy.org/installation/update_comfyui)) and prepare required models. Desktop/Cloud updates follow stable releases, so some nightly-supported models may not be available yet.\n\n- Cannot run / runtime errors: [ComfyUI/issues](https://github.com/comfyanonymous/ComfyUI/issues)\n- UI / frontend issues: [ComfyUI_frontend/issues](https://github.com/Comfy-Org/ComfyUI_frontend/issues)\n- Workflow issues: [workflow_templates/issues](https://github.com/Comfy-Org/workflow_templates/issues)\n"
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 8,
+      "type": "MarkdownNote",
+      "pos": [
+        30,
+        950
+      ],
+      "size": [
+        870,
+        130
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "作者署名",
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "## 作者署名\n\n**沐阳Myang** · Bilibili：沐阳Myang · GitHub：civilcoco"
+      ],
+      "widgets_values_named": {
+        "text": "## 作者署名\n\n**沐阳Myang** · Bilibili：沐阳Myang · GitHub：civilcoco"
+      },
+      "color": "#243047",
+      "bgcolor": "#182033"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "MYANG_H3"
+    ],
+    [
+      2,
+      1,
+      0,
+      4,
+      0,
+      "MYANG_H3"
+    ],
+    [
+      3,
+      2,
+      0,
+      4,
+      1,
+      "MODEL"
+    ],
+    [
+      4,
+      2,
+      0,
+      4,
+      44,
+      "MODEL"
+    ],
+    [
+      5,
+      3,
+      0,
+      4,
+      2,
+      "SAMPLER"
+    ],
+    [
+      6,
+      4,
+      0,
+      5,
+      0,
+      "IMAGE"
+    ],
+    [
+      7,
+      4,
+      1,
+      5,
+      1,
+      "AUDIO"
+    ],
+    [
+      8,
+      4,
+      3,
+      5,
+      2,
+      "FLOAT"
+    ],
+    [
+      9,
+      5,
+      0,
+      6,
+      0,
+      "VIDEO"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "模型与采样器",
+      "bounding": [
+        10,
+        10,
+        900,
+        930
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "导演台",
+      "bounding": [
+        940,
+        10,
+        820,
+        1030
+      ],
+      "color": "#285d65",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "成片",
+      "bounding": [
+        1770,
+        10,
+        420,
+        440
+      ],
+      "color": "#4f7d47",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.47.12",
+    "ds": {
+      "scale": 0.72,
+      "offset": [
+        20,
+        30
+      ]
+    }
+  },
+  "version": 0.4
+}

@@ -1,0 +1,37 @@
+name: Release checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-release-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate release contents
+        run: python tools/release_audit.py
+
+      - name: Compile Python sources
+        run: python -m compileall -q .
+
+      - name: Run frontend structure regressions
+        run: |
+          node --experimental-default-type=module tests/test_storyboard_cards.mjs
+          node --experimental-default-type=module tests/test_progress_state.mjs

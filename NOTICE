@@ -1,0 +1,21 @@
+ComfyUI-MiniMaxH3-Myang
+Copyright (C) 2026 沐阳Myang
+
+Author and maintainer: 沐阳Myang
+Bilibili: 沐阳Myang
+GitHub: civilcoco
+
+This distribution is licensed under GPL-3.0-only. See LICENSE.
+
+It includes modified portions from:
+
+- ComfyUI-H3-Motion-Context, Copyright (C) 2026 NikoDemon80,
+  licensed under GPL-3.0.
+- ComfyUI MiniMax H3 Director, Copyright 2026 ComfyUI-Bernini Contributors,
+  licensed under Apache-2.0.
+
+Exact source repositories, audited revisions, modification boundaries and full
+retained notices are recorded in THIRD_PARTY_NOTICES.md and LICENSES/.
+
+MiniMax H3 model weights, MiniMax Hub Skills, official H3 prompt manuals and
+generated H3 media are not part of this distribution.
