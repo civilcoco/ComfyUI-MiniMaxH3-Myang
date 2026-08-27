@@ -19,7 +19,6 @@ from . import core
 from . import detail
 from . import media as director_media
 from . import nodes as legacy
-from . import nodes_v2
 from . import turbo
 
 
@@ -735,7 +734,7 @@ class H3Director:
             prompt_mode=legacy.MODE_DIRECT, media_prefix="",
             legacy_plan_padding="",
             ref_image_size=ref_image_size,
-            detail_refinement=nodes_v2.DETAIL_NATIVE,
+            detail_refinement=legacy.DETAIL_NATIVE,
             save_segments=bool(save_segments), segment_prefix=segment_prefix,
             save_raw_segments=bool(save_raw_segments) and
             (integrated_detail or legacy_detail is not None))

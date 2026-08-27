@@ -4,6 +4,15 @@ All notable changes are documented here.
 
 ## 0.1.0 - Unreleased
 
+- Consolidated the active native long-video implementation into `nodes.py`.
+  Removed the version-suffixed `nodes_v2.py` module and the unreachable legacy
+  Motion Context compatibility path while preserving public node IDs and
+  serialized widget positions. Removed the redundant `core_v2.py` re-export,
+  renamed the active anchor compatibility module by responsibility, and dropped
+  the disabled legacy workflow builder.
+- Made synchronized anchor trimming pad a short audio tail with silence as well
+  as truncate a long one, preventing per-segment AV duration drift. The complete
+  suite now passes against both ComfyUI v0.33.2 and v0.34.0 layouts.
 - Prepared the public release boundary: removed unverified third-party Skills,
   generated H3 samples, runtime caches and private-path reports from the
   distributable tree; sanitized example media names and removed watermark-

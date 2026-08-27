@@ -15,9 +15,7 @@ for path in (str(PACKAGE_DIR.parent.parent), str(PACKAGE_DIR.parent)):
         sys.path.insert(0, path)
 
 core = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
-core_v2 = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core_v2")
 legacy = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-native = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
 media_catalog = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
 
 
@@ -46,7 +44,7 @@ def run(plan_json, task, overlap, ref_video=None,
     h3 = SimpleNamespace(
         video_vae=object(), audio_vae=object(),
         names={"model": "minimax/minimax_h3_ref2va_int8.safetensors"})
-    return native.H3LongVideo().run(
+    return legacy.H3LongVideo().run(
         h3=h3, model=object(), sampler=object(), plan_json=plan_json,
         task_mode=task, resolution="480P", aspect_ratio="16:9",
         width=864, height=480, steps=8, denoise=1.0,
@@ -103,7 +101,7 @@ def test_modern_video_and_soundtrack_are_normalised():
     try:
         h3 = SimpleNamespace(clip=object(), video_vae=object(),
                              audio_vae=object())
-        core_v2.H3Condition().build(
+        core.H3Condition().build(
             h3=h3, prompt="参考@视频1和@音频1",
             resolution="自定义", aspect_ratio="16:9",
             width=64, height=64, seconds=5.0,

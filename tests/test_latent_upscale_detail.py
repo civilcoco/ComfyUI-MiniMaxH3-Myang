@@ -16,7 +16,7 @@ for p in (str(COMFY_DIR), str(CUSTOM_NODES_DIR)):
 import comfy.nested_tensor
 pkg = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 detail = importlib.import_module("ComfyUI-MiniMaxH3-Myang.detail")
-nodes_v2 = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
+nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
 latent_upscale_3d = importlib.import_module("ComfyUI-MiniMaxH3-Myang.latent_upscale_3d")
 
 

@@ -17,7 +17,6 @@ for p in (str(CUSTOM_NODES_DIR), str(COMFY_DIR)):
 pkg = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 turbo = importlib.import_module("ComfyUI-MiniMaxH3-Myang.turbo")
 nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-nodes_v2 = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
 
 
 def test_turbo_speed_cache_integration():
@@ -110,7 +109,7 @@ def test_turbo_can_override_and_publish_actual_shift():
 
 def test_splitter_schema_clean():
     print("Testing H3ScriptSplitter clean schema...")
-    splitter = nodes_v2.H3ScriptSplitter()
+    splitter = nodes.H3ScriptSplitter()
     schema = splitter.INPUT_TYPES()
     assert "detail_boost" not in schema["required"]
     assert "llm_enabled" in schema["required"]

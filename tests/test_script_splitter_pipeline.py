@@ -17,8 +17,7 @@ for path in (str(COMFY_ROOT), str(CUSTOM_NODES)):
 
 package = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 agent_module = importlib.import_module("ComfyUI-MiniMaxH3-Myang.agent_nodes")
-nodes_legacy = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-nodes_v2 = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
+nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
 media_types = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
 
 
@@ -63,7 +62,7 @@ def test_agent_myang_prompt_generation():
 
 def test_script_splitter_empty_script():
     """Verify that H3ScriptSplitter handles empty script cleanly without LLM."""
-    splitter = nodes_v2.H3ScriptSplitter()
+    splitter = nodes.H3ScriptSplitter()
     out = splitter.split(
         script="",
         total_seconds=20.0,
@@ -87,7 +86,7 @@ def test_script_splitter_empty_script():
 
 def test_script_splitter_manual_llm_toggle():
     """Verify that H3ScriptSplitter allows manual toggle (llm_enabled=False) with non-empty script."""
-    splitter = nodes_v2.H3ScriptSplitter()
+    splitter = nodes.H3ScriptSplitter()
     script_content = "参考@视频1中的角色动作，保持环境风格不变。"
     out = splitter.split(
         script=script_content,
@@ -137,11 +136,11 @@ def test_script_splitter_plan_json_contains_prompts():
     plan_json_str = json.dumps(plan_data, ensure_ascii=False)
 
     # Test H3SegmentPrompt retrieval
-    seg_prompt_node = nodes_legacy.H3SegmentPrompt()
+    seg_prompt_node = nodes.H3SegmentPrompt()
     p1, b1 = seg_prompt_node.build(
         plan_json=plan_json_str,
         segment_index=1,
-        mode=nodes_legacy.MODE_DIRECT,
+        mode=nodes.MODE_DIRECT,
         media_prefix="",
         llm_service="none",
         carry_prev_tail=False,
@@ -153,7 +152,7 @@ def test_script_splitter_plan_json_contains_prompts():
     p2, b2 = seg_prompt_node.build(
         plan_json=plan_json_str,
         segment_index=2,
-        mode=nodes_legacy.MODE_DIRECT,
+        mode=nodes.MODE_DIRECT,
         media_prefix="",
         llm_service="none",
         carry_prev_tail=False,
@@ -187,7 +186,7 @@ def test_longvideo_consumes_plan_json_prompts_without_separate_prompt():
     }
     plan_json_str = json.dumps(plan_data, ensure_ascii=False)
 
-    long_video = nodes_v2.H3LongVideo()
+    long_video = nodes.H3LongVideo()
     bundle = FakeBundle()
     ref_video = torch.zeros(500, 480, 864, 3)
 
@@ -197,7 +196,7 @@ def test_longvideo_consumes_plan_json_prompts_without_separate_prompt():
         model=object(),
         sampler=object(),
         plan_json=plan_json_str,
-        task_mode=nodes_legacy.TASK_TRANSFER,
+        task_mode=nodes.TASK_TRANSFER,
         resolution="480P",
         aspect_ratio="16:9",
         width=864,
@@ -207,7 +206,7 @@ def test_longvideo_consumes_plan_json_prompts_without_separate_prompt():
         scheduler="simple",
         noise_seed=0,
         context_length="22",
-        prompt_mode=nodes_legacy.MODE_DIRECT,
+        prompt_mode=nodes.MODE_DIRECT,
         media_prefix="",
         llm_service="none",
         drift_method="off",

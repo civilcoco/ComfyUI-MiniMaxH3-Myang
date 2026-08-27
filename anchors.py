@@ -580,7 +580,7 @@ class H3AnchorContext:
     def apply(self, conditioning, vae, latent, context_length,
               context_latent=None, context_frames=None,
               context_audio=None, audio_vae=None):
-        from .compat_v2 import ensure_anchors
+        from .anchor_compat import ensure_anchors
         ensure_anchors()
 
         trim = int(context_length)
@@ -673,7 +673,7 @@ class H3AnchorKeyframe:
         }}
 
     def apply(self, conditioning, vae, latent, image, frame_index):
-        from .compat_v2 import ensure_anchors
+        from .anchor_compat import ensure_anchors
         ensure_anchors()
         target = video_stream(latent)
         frame_count = pixel_frames(int(target.shape[2]))
@@ -736,6 +736,9 @@ class H3AnchorTrim:
         wanted = int(round(int(images.shape[0]) / float(fps) * sample_rate))
         if int(waveform.shape[-1]) > wanted:
             waveform = waveform[..., :wanted]
+        elif int(waveform.shape[-1]) < wanted:
+            waveform = torch.nn.functional.pad(
+                waveform, (0, wanted - int(waveform.shape[-1])))
         return (images, {
             "waveform": waveform,
             "sample_rate": sample_rate,

@@ -9,7 +9,9 @@ tests/__pycache__/
 skills/_skill_index.json
 skills/_skill_memory.json
 .github/
-docs/research/
+.gitattributes
+.gitignore
+docs/
 tests/
 tools/
 CHANGELOG.md

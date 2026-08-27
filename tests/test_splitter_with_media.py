@@ -16,13 +16,12 @@ for p in (str(CUSTOM_NODES_DIR), str(COMFY_DIR)):
 pkg = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 core = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
 nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-nodes_v2 = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
 media_catalog = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
 
 
 def test_splitter_media_integration():
     print("Testing H3ScriptSplitter media integration...")
-    splitter = nodes_v2.H3ScriptSplitter()
+    splitter = nodes.H3ScriptSplitter()
     schema = splitter.INPUT_TYPES()
     assert "media" in schema.get("optional", {})
 
@@ -106,7 +105,7 @@ def test_skill_and_vision_reach_the_split_prompt():
     llm_service.call_vlm = fake_call_vlm
     llm_service.tensor_to_base64 = lambda tensor: "data:image/png;base64,stub"
     try:
-        plan_json, count, *_rest = nodes_v2.H3ScriptSplitter().split(
+        plan_json, count, *_rest = nodes.H3ScriptSplitter().split(
             script="白发少女在夜市里旋转起舞，然后走向摊位。",
             total_seconds=20.0, length_source="手动设定总时长",
             segment_seconds=5.0, overlap_frames=22, fps=24.0,
@@ -181,7 +180,7 @@ def _split(llm, **overrides):
     original = nodes.call_llm
     nodes.call_llm = llm
     try:
-        return nodes_v2.H3ScriptSplitter().split(**inputs)
+        return nodes.H3ScriptSplitter().split(**inputs)
     finally:
         nodes.call_llm = original
 

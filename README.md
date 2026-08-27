@@ -33,8 +33,9 @@ git clone https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang.git
 
 运行时必需：
 
-- 支持官方 MiniMax H3 节点的较新版本 ComfyUI；当前验证基线为
-  `43cb4fffc89bba20ab7bd61467a36d0339338dab`。
+- 支持官方 MiniMax H3 节点的较新版本 ComfyUI；完整回归已分别通过
+  ComfyUI `v0.33.2`（旧 H3 layout）与 `v0.34.0`（官方任意位置锚点 layout）。
+  更早版本不在首发支持范围内。
 - MiniMax H3 diffusion model、Qwen text encoder、video VAE 和 audio VAE；
   请从模型发布方获取，本仓库不提供下载副本。
 

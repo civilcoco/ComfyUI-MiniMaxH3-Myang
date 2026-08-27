@@ -22,7 +22,7 @@ REQUIRED_FILES = {
 }
 IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache"}
 RUNTIME_DEPENDENCY_FILES = {
-    "director.py", "nodes_v2.py", "agent_nodes.py",
+    "director.py", "nodes.py", "agent_nodes.py",
     "web/h3_director_ui.js", "web/h3_longvideo_ui.js",
     "web/minimax_h3_myang_agent_ui.js",
 }

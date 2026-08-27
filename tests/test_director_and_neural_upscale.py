@@ -19,7 +19,6 @@ package = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 director = importlib.import_module("ComfyUI-MiniMaxH3-Myang.director")
 neural = importlib.import_module("ComfyUI-MiniMaxH3-Myang.latent_upscale_3d")
 legacy = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-native = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
 shot_media_module = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media")
 media_catalog = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
 turbo = importlib.import_module("ComfyUI-MiniMaxH3-Myang.turbo")
@@ -441,7 +440,7 @@ def test_continuation_uses_previous_video_only_as_motion_context():
         {"prompt": "续写第二段", "duration_seconds": 5},
     ]}, 22)
     ref_video = torch.zeros(60, 1, 1, 3)
-    graph = native.H3LongVideo().run(
+    graph = legacy.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_CONTINUE, resolution="480P",
@@ -468,7 +467,7 @@ def test_action_transfer_slices_video_and_audio_on_the_same_windows():
         {"shots": [{"prompt": "统一动作"}]}, 22, 5, 240)
     ref_video = torch.zeros(240, 1, 1, 3)
     ref_audio = {"waveform": torch.zeros(1, 1, 320000), "sample_rate": 32000}
-    graph = native.H3LongVideo().run(
+    graph = legacy.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",
@@ -530,7 +529,7 @@ def test_long_video_resume_anchors_context_video_without_using_it_as_reference()
         {"shots": [{"prompt": "统一动作"}]}, 22, 5, 700, start_segment=5)
     ref_video = torch.zeros(700, 1, 1, 3)
     context_video = torch.zeros(125, 1, 1, 3)
-    graph = native.H3LongVideo().run(
+    graph = legacy.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",
@@ -681,7 +680,7 @@ def test_manifest_numbering_matches_the_generator_and_survives_the_cache_key():
         media_catalog.MyangMediaAsset(
             3, "image", torch.zeros(1, 8, 8, 3), "street.png", "夜市街景"),
     ))
-    rows = list(native.core.media_rows(bundle))
+    rows = list(legacy.core.media_rows(bundle))
     check([(kind, ordinal) for kind, ordinal, _s, _f in rows]
           == [("image", 1), ("image", 2), ("video", 1)],
           "media_rows did not renumber per type the way H3Condition counts")
@@ -997,7 +996,7 @@ def test_long_video_uses_variable_shot_windows():
         {"prompt": "镜头一", "duration_seconds": 5},
         {"prompt": "镜头二", "duration_seconds": 6},
     ]}, 22)
-    graph = native.H3LongVideo().run(
+    graph = legacy.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",
@@ -1032,7 +1031,7 @@ def test_long_video_routes_each_shot_action_material_lazily():
             }],
         })
     plan = director._timeline_plan({"version": 2, "shots": shots}, 22)
-    graph = native.H3LongVideo().run(
+    graph = legacy.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",

@@ -18,12 +18,10 @@ for path in (str(COMFY_ROOT), str(CUSTOM_NODES)):
 
 package = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 anchors = importlib.import_module("ComfyUI-MiniMaxH3-Myang.anchors")
-compat = importlib.import_module("ComfyUI-MiniMaxH3-Myang.compat_v2")
+compat = importlib.import_module("ComfyUI-MiniMaxH3-Myang.anchor_compat")
 core = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
-core_v2 = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core_v2")
 detail = importlib.import_module("ComfyUI-MiniMaxH3-Myang.detail")
 legacy = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-native = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
 seam = importlib.import_module("ComfyUI-MiniMaxH3-Myang.seam")
 turbo = importlib.import_module("ComfyUI-MiniMaxH3-Myang.turbo")
 
@@ -39,8 +37,8 @@ def test_registration_and_schema():
                 "H3DetailRefine", "H3DetailSettings"}
     check(expected.issubset(package.NODE_CLASS_MAPPINGS),
           "native node mappings are incomplete")
-    old_names = list(legacy.H3LongVideo.INPUT_TYPES()["required"])
-    new_names = list(native.H3LongVideo.INPUT_TYPES()["required"])
+    old_names = list(legacy._H3LongVideoInputs.INPUT_TYPES()["required"])
+    new_names = list(legacy.H3LongVideo.INPUT_TYPES()["required"])
     # drift 校正与 anchor_schedule 已移除（回归 motion-context 全钉 + latent 无损）
     for gone in ("drift_method", "drift_strength", "anchor_schedule", "seam_blend_frames"):
         check(gone not in new_names, "H3LongVideo still exposes removed widget %s" % gone)
@@ -51,18 +49,18 @@ def test_registration_and_schema():
           "H3LongVideo positional widgets (minus drift/LLM migration) changed order")
     check("llm_service" not in new_names,
           "H3LongVideo still owns an LLM service input")
-    check(native.H3LongVideo.INPUT_TYPES()["required"][
+    check(legacy.H3LongVideo.INPUT_TYPES()["required"][
               "legacy_plan_padding"][0] == "STRING",
           "legacy LLM position is not an inert migration string")
     check(new_names[len(expected_base):] == ["detail_refinement", "save_raw_segments"],
           "native detail widgets were not appended after drift removal")
-    optional = native.H3LongVideo.INPUT_TYPES()["optional"]
+    optional = legacy.H3LongVideo.INPUT_TYPES()["optional"]
     check("二采设置" in optional and "refine_model" not in optional and
           "detail_settings" not in optional,
           "H3LongVideo did not collapse detail controls into one Chinese input")
     check("二采模型" in detail.H3DetailSettings.INPUT_TYPES()["optional"],
           "detail controller has no Chinese base-model input")
-    check("ref_video" in core_v2.H3Condition.INPUT_TYPES()["optional"],
+    check("ref_video" in core.H3Condition.INPUT_TYPES()["optional"],
           "H3Condition has no direct per-segment ref_video")
 
 
@@ -264,6 +262,16 @@ def test_trim():
     expected_samples = round(102 / 24.0 * sample_rate)
     check(int(trimmed_audio["waveform"].shape[-1]) == expected_samples,
           "audio tail does not match delivered frames")
+    short_audio = {
+        "waveform": torch.ones(1, 2, round((22 / 24.0) * sample_rate) + 1000),
+        "sample_rate": sample_rate,
+    }
+    _, padded_audio = anchors.H3AnchorTrim().trim(
+        images, 22, audio=short_audio, fps=24.0)
+    check(int(padded_audio["waveform"].shape[-1]) == expected_samples,
+          "short audio tail was not padded to delivered video duration")
+    check(torch.count_nonzero(padded_audio["waveform"][..., 1000:]) == 0,
+          "short audio padding fabricated non-zero samples")
 
 
 def _plan(count=2, overlap=22):
@@ -286,11 +294,11 @@ def _detail_settings(enabled=True, resolution="928P", model=None):
 
 
 def _expand(task, ref_video=None, overlap=22,
-            detail_refinement=native.DETAIL_NATIVE, model=None, sampler=None,
+            detail_refinement=legacy.DETAIL_NATIVE, model=None, sampler=None,
             steps=8, scheduler="simple", denoise=1.0,
             drift_method="off", drift_strength=0.0, detail_settings=None):
     h3 = SimpleNamespace(video_vae=object(), audio_vae=object())
-    return native.H3LongVideo().run(
+    return legacy.H3LongVideo().run(
         h3=h3,
         model=model if model is not None else object(),
         sampler=sampler if sampler is not None else object(),
@@ -368,7 +376,7 @@ def test_dynamic_expansion():
 def test_low_sigma_refinement():
     graph = _expand(
         legacy.TASK_FRESH,
-        detail_refinement=native.DETAIL_BALANCED)
+        detail_refinement=legacy.DETAIL_BALANCED)
     refiners = [node for node in graph.values()
                 if node["class_type"] == "ExtendIntermediateSigmas"]
     samplers = [node for node in graph.values()
@@ -388,7 +396,7 @@ def test_low_sigma_refinement():
     kinds = [node["class_type"] for node in graph.values()]
     check("MiniMaxH3SigmaShift" not in kinds, "H3 shift was overridden")
     check("SplitSigmasDenoise" not in kinds, "schedule was split in two")
-    strong = native.detail_refinement_params(native.DETAIL_STRONG)
+    strong = legacy.detail_refinement_params(legacy.DETAIL_STRONG)
     check(strong == {"steps": 3, "start_at_sigma": 0.8,
                      "end_at_sigma": 0.0, "spacing": "cosine"},
           "strong refinement profile changed")
@@ -595,7 +603,7 @@ def test_turbo_schedule_contract():
     graph = _expand(
         legacy.TASK_FRESH, model=result[0],
         sampler=SimpleNamespace(sampler_function=sample_euler),
-        detail_refinement=native.DETAIL_BALANCED)
+        detail_refinement=legacy.DETAIL_BALANCED)
     check(not any(node["class_type"] == "ExtendIntermediateSigmas"
                   for node in graph.values()),
           "Turbo did not automatically suppress low-sigma refinement")
@@ -639,7 +647,7 @@ def test_direct_reference_condition():
         h3 = SimpleNamespace(clip=object(), video_vae=object(),
                              audio_vae=object())
         video = torch.zeros(5, 2, 2, 3)
-        result = core_v2.H3Condition().build(
+        result = core.H3Condition().build(
             h3=h3,
             prompt="参考@视频1的动作",
             resolution="自定义",

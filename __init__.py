@@ -2,7 +2,7 @@
 
 __version__ = "0.1.0"
 
-from .nodes_v2 import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 from .drift import (
     NODE_CLASS_MAPPINGS as _DRIFT_CLASSES,
     NODE_DISPLAY_NAME_MAPPINGS as _DRIFT_NAMES,
@@ -11,7 +11,7 @@ from .media import (
     NODE_CLASS_MAPPINGS as _MEDIA_CLASSES,
     NODE_DISPLAY_NAME_MAPPINGS as _MEDIA_NAMES,
 )
-from .core_v2 import (
+from .core import (
     NODE_CLASS_MAPPINGS as _CORE_CLASSES,
     NODE_DISPLAY_NAME_MAPPINGS as _CORE_NAMES,
 )

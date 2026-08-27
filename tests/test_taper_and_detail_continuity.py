@@ -18,7 +18,7 @@ for path in (str(COMFY_ROOT), str(CUSTOM_NODES)):
 package = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 anchors_module = importlib.import_module("ComfyUI-MiniMaxH3-Myang.anchors")
 seam_module = importlib.import_module("ComfyUI-MiniMaxH3-Myang.seam")
-nodes_v2 = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes_v2")
+nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
 detail_module = importlib.import_module("ComfyUI-MiniMaxH3-Myang.detail")
 
 
@@ -91,7 +91,7 @@ def test_longvideo_transfer_latent_continuity():
         "steps": 4, "denoise": 0.2, "scheduler": "beta", "sampler_name": "res_multistep",
         "upscale_method": "bicubic", "chunk_frames": 4, "model": object(),
     }
-    res = nodes_v2.H3LongVideo().run(
+    res = nodes.H3LongVideo().run(
         h3=bundle, model=object(), sampler=object(),
         plan_json=json.dumps(plan_data),
         task_mode="动作迁移（跟随参考视频）", resolution="480P", aspect_ratio="16:9",
