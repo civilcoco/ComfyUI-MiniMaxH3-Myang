@@ -35,3 +35,4 @@ jobs:
         run: |
           node --experimental-default-type=module tests/test_storyboard_cards.mjs
           node --experimental-default-type=module tests/test_progress_state.mjs
+          node --experimental-default-type=module tests/test_llm_config_ui.mjs

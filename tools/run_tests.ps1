@@ -37,7 +37,7 @@ foreach ($name in $pythonTests) {
 }
 
 if (Get-Command node -ErrorAction SilentlyContinue) {
-    foreach ($name in @("test_storyboard_cards.mjs", "test_progress_state.mjs")) {
+    foreach ($name in @("test_storyboard_cards.mjs", "test_progress_state.mjs", "test_llm_config_ui.mjs")) {
         Write-Host "RUN tests/$name"
         & node --experimental-default-type=module (Join-Path $packageRoot "tests\$name")
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

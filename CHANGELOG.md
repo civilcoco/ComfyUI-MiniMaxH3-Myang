@@ -4,6 +4,9 @@ All notable changes are documented here.
 
 ## 0.1.0 - Unreleased
 
+- Fixed the LLM service settings panel failing to render because its route
+  status presentation helper was missing. Added safe status labels for ready,
+  cooling, quota-blocked, disabled, and unknown routes.
 - Consolidated the active native long-video implementation into `nodes.py`.
   Removed the version-suffixed `nodes_v2.py` module and the unreachable legacy
   Motion Context compatibility path while preserving public node IDs and

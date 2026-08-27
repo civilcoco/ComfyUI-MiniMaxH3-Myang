@@ -65,6 +65,55 @@ function settingId(name) {
     return `${SETTINGS_NAMESPACE}.${name}`;
 }
 
+function routeStatusPresentation(route) {
+    const runtime = route?.runtime || {};
+    const status = String(runtime.status || "ready").toLowerCase();
+    const remaining = Math.max(0, Number(runtime.cooldown_remaining || 0));
+    if (status === "disabled") {
+        return {
+            label: "已停用",
+            title: "线路已停用",
+            color: "#888",
+            border: "#555",
+            background: "#25252d",
+        };
+    }
+    if (status === "blocked") {
+        return {
+            label: remaining > 0 ? `配额阻断 ${Math.ceil(remaining)}s` : "配额阻断",
+            title: runtime.reason || "线路因配额耗尽暂时阻断",
+            color: "#ff9f43",
+            border: "#8d5b25",
+            background: "#392b1d",
+        };
+    }
+    if (status === "cooling") {
+        return {
+            label: remaining > 0 ? `冷却中 ${Math.ceil(remaining)}s` : "冷却中",
+            title: runtime.reason || "线路暂时冷却，故障转移会尝试其他线路",
+            color: "#ffd866",
+            border: "#8d7626",
+            background: "#38331e",
+        };
+    }
+    if (status === "ready" || status === "active") {
+        return {
+            label: "可用",
+            title: "线路可用",
+            color: "#a9dc76",
+            border: "#527a37",
+            background: "#24331f",
+        };
+    }
+    return {
+        label: "未知",
+        title: runtime.reason || `未识别的线路状态：${status}`,
+        color: "#cfcfcf",
+        border: "#666",
+        background: "#2a2a32",
+    };
+}
+
 function migratedSettingDefault(name, fallback, parse = (value) => value) {
     try {
         const currentId = settingId(name);
