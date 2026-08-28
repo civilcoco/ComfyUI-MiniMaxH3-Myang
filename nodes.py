@@ -1012,23 +1012,6 @@ BOOST_PROMPTS = {
     DETAIL_BOOST_ANIME: "清爽利落的二次元线条，通透赛璐璐上色，鲜明高光反光，动感二次元构图，high quality anime visual, clean lineart, vibrant celluloid shading, dynamic anime cinematography",
 }
 
-DETAIL_NATIVE = "关闭（H3原生轨迹）"
-DETAIL_BALANCED = "低Sigma精修（均衡·实验）"
-DETAIL_STRONG = "低Sigma精修（强化·更慢）"
-DETAIL_REFINEMENTS = [DETAIL_NATIVE, DETAIL_BALANCED, DETAIL_STRONG]
-
-
-def detail_refinement_params(profile):
-    """Extra low-noise ODE points; keep H3's trained 12/3 AV shift intact."""
-    if str(profile) == DETAIL_BALANCED:
-        return {"steps": 2, "start_at_sigma": 0.8,
-                "end_at_sigma": 0.0, "spacing": "cosine"}
-    if str(profile) == DETAIL_STRONG:
-        return {"steps": 3, "start_at_sigma": 0.8,
-                "end_at_sigma": 0.0, "spacing": "cosine"}
-    return None
-
-
 def _native_frame_length(seconds, fps):
     return core.length_for(seconds, 24.0)
 
@@ -1678,13 +1661,6 @@ class H3LongVideo(_H3LongVideoInputs):
                     "必须与分段 overlap_frames 一致。22=稳定基线；"
                     "5=实验速度锚点；39/56=更长连续窗"),
             })
-        schema["required"]["detail_refinement"] = (
-            DETAIL_REFINEMENTS, {
-                "default": DETAIL_NATIVE,
-                "tooltip": "在 H3 原生 sigma 轨迹的低噪声末段插入额外积分点。"
-                           "均衡约增加 25% 采样步；强化约增加 50%。"
-                           "不改变官方视频/音频 shift，也不拆成两次采样",
-            })
         schema["required"]["save_raw_segments"] = (
             "BOOLEAN", {
                 "default": False,
@@ -1710,7 +1686,6 @@ class H3LongVideo(_H3LongVideoInputs):
             aspect_ratio, width, height, steps, denoise, scheduler,
             noise_seed, context_length, prompt_mode, media_prefix,
             ref_image_size,
-            detail_refinement=DETAIL_NATIVE,
             save_segments=True, segment_prefix="video/H3_长视频",
             save_raw_segments=False,
             ref_video=None, ref_audio=None, media=None, **kwargs):
@@ -1792,12 +1767,6 @@ class H3LongVideo(_H3LongVideoInputs):
                 raise ValueError(
                     "LightX2V H3 Turbo 官方 ComfyUI 工作流使用 Euler；"
                     "当前采样器函数是 %s" % sampler_name)
-            if detail_refinement_params(detail_refinement) is not None:
-                logger.warning(
-                    "H3-Myang: Turbo LoRA 已启用，自动忽略『%s』，避免额外插入低 Sigma 精修步",
-                    detail_refinement)
-                detail_refinement = DETAIL_NATIVE
-
         if abs(fps - 24.0) > 1e-6:
             raise ValueError("MiniMax H3 固定按 24fps 建模；请重新运行分段计划")
         for offset, frame_count in enumerate(segment_frames):
@@ -2110,18 +2079,12 @@ class H3LongVideo(_H3LongVideoInputs):
             sigmas = graph.node(
                 "BasicScheduler", model=model, scheduler=scheduler,
                 steps=steps, denoise=denoise)
-            sigma_link = sigmas.out(0)
-            refinement = detail_refinement_params(detail_refinement)
-            if refinement is not None:
-                sigma_link = graph.node(
-                    "ExtendIntermediateSigmas", sigmas=sigma_link,
-                    **refinement).out(0)
             noise = graph.node(
                 "RandomNoise", noise_seed=noise_seed + index - 1)
             sample = graph.node(
                 "H3SamplerAdvanced", noise=noise.out(0),
                 guider=guider.out(0), sampler=sampler,
-                sigmas=sigma_link, latent_image=first_latent,
+                sigmas=sigmas.out(0), latent_image=first_latent,
                 vae=video_vae, run_id=run_id,
                 owner_id=progress_owner,
                 segment_index=index, total_segments=count,

@@ -734,7 +734,6 @@ class H3Director:
             prompt_mode=legacy.MODE_DIRECT, media_prefix="",
             legacy_plan_padding="",
             ref_image_size=ref_image_size,
-            detail_refinement=legacy.DETAIL_NATIVE,
             save_segments=bool(save_segments), segment_prefix=segment_prefix,
             save_raw_segments=bool(save_raw_segments) and
             (integrated_detail or legacy_detail is not None))

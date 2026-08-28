@@ -16,8 +16,7 @@ All notable changes to this project are documented here.
 - Added action-transfer resume support and per-segment output saving.
 - Added implemented LightX2V Turbo profiles with task, step, scheduler, and AV
   shift validation.
-- Added optional low-sigma refinement and pixel, latent, neural 3D, and NVIDIA
-  RTX VSR second-pass paths.
+- Added optional pixel, latent, neural 3D, and NVIDIA RTX VSR second-pass paths.
 - Added the local LLM/VLM service-management panel with protected API-key
   handling and provider routing.
 - Added regression coverage for ComfyUI v0.33.2 and v0.34.0 layouts, frontend

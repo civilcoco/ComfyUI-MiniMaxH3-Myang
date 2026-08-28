@@ -80,7 +80,7 @@ Start with:
    `@图片N`, `@视频N`, or `@音频N`.
 5. Render only two segments first. Use 22 context frames and inspect the picture, motion, lip sync,
    and audio at the join.
-6. Once the seam is sound, increase the segment count or enable Turbo, low-sigma refinement, or a second pass.
+6. Once the seam is sound, increase the segment count or enable Turbo or a second pass.
 
 For a graph with individually wired stages, open:
 
@@ -171,7 +171,7 @@ Establish a two-segment baseline with 22 frames before comparing another length 
 The smart splitter labels each boundary as a continuation or a cut. Both use temporal anchors. A cut is
 described by the next shot's prompt; it is not a black frame, flash, or post-production hard cut.
 
-## Turbo and low-sigma refinement
+## Turbo
 
 `沐阳 H3 · Turbo LoRA 联合音画加载调度` calls ComfyUI's LoRA loader and applies the paired H3
 video/audio shifts. The following table lists the presets implemented by this package:
@@ -184,8 +184,7 @@ video/audio shifts. The following table lists the presets implemented by this pa
 | Ref2VA v0.1 4-step | 12 / 3 | 4 | Mixed 544p ratios |
 
 Turbo follows a fixed NFE trajectory and requires the `simple` scheduler, `denoise=1.0`, and an Euler
-sampler. Low-sigma insertion changes that trajectory, so the two modes cannot be enabled together.
-Prefer an FL2VA/T2VA preset for generation and a Ref2VA preset for motion transfer.
+sampler. Prefer an FL2VA/T2VA preset for generation and a Ref2VA preset for motion transfer.
 
 The upstream project may publish additional checkpoints. In v0.1.0, the upstream **8-step v1.0
 768P** checkpoint has no dedicated Myang profile; do not use filename-based Auto detection for it.
@@ -199,9 +198,6 @@ cache disabled.
 Preset sources:
 [LightX2V model page](https://huggingface.co/lightx2v/Minimax-h3-Turbo) and
 [publisher ComfyUI workflows](https://github.com/ModelTC/Minimax-H3-Turbo/tree/main/example_workflows).
-
-Without Turbo, **Low Sigma Refinement** can add integration points to the low-noise end of the sampling
-trajectory. Compare Off and Balanced with identical media, seed, and settings before using it for a long job.
 
 ## Second-pass upscale
 

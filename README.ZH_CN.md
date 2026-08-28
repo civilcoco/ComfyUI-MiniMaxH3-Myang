@@ -76,7 +76,7 @@ git clone https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang.git
 4. 上传公共素材或镜头专属素材；需要指定素材时，在提示词中使用
    `@图片N`、`@视频N`、`@音频N`。
 5. 第一次运行建议只生成两段，并使用 22 帧上下文检查画面、动作、口型和声音接缝。
-6. 接缝稳定后，再增加分段或启用 Turbo、低 Sigma 精修和二采放大。
+6. 接缝稳定后，再增加分段或启用 Turbo、二采放大。
 
 可拆线的完整示例：
 
@@ -164,7 +164,7 @@ A/B，再根据素材表现测试其他长度。
 智能切分会为分界点标记“承接”或“切镜”。两种模式都会使用段间锚点；“切镜”由新分段的
 镜头描述完成，不等同于黑场、闪白或后期硬切。
 
-## Turbo 与低 Sigma 精修
+## Turbo
 
 “沐阳 H3 · Turbo LoRA 联合音画加载调度”调用 ComfyUI 的 LoRA 加载器，并设置 H3
 视频与音频的配套 shift。本包当前实现的档位如下：
@@ -177,8 +177,7 @@ A/B，再根据素材表现测试其他长度。
 | Ref2VA v0.1 4-step | 12 / 3 | 4 | 544p 混合比例 |
 
 Turbo 使用固定 NFE 轨迹，需配合 `simple` scheduler、`denoise=1.0` 和 Euler 采样器。
-低 Sigma 插点会改变该轨迹，因此两者不能同时启用。纯生成优先使用 FL2VA/T2VA 档位，
-动作迁移优先使用 Ref2VA 档位。
+纯生成优先使用 FL2VA/T2VA 档位，动作迁移优先使用 Ref2VA 档位。
 
 上游可能继续发布其他权重。v0.1.0 尚未为上游的 **8-step v1.0 768P** 权重提供独立档位，
 请勿对它使用文件名 Auto 识别。除非已经自行验证手动 shift，否则只使用上表档位，或等待
@@ -190,9 +189,6 @@ Turbo 节点也提供可选的 TE-Speed 与 Spectrum 缓存模式。它们需要
 参数依据：
 [LightX2V 模型页](https://huggingface.co/lightx2v/Minimax-h3-Turbo) 和
 [发布方 ComfyUI 工作流](https://github.com/ModelTC/Minimax-H3-Turbo/tree/main/example_workflows)。
-
-不使用 Turbo 时，可以启用“低 Sigma 精修”，在采样轨迹的低噪声区间增加积分点。建议用
-相同素材、seed 和参数比较“关闭”与“均衡”，再决定是否用于长任务。
 
 ## 二采放大
 

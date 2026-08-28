@@ -52,8 +52,8 @@ def test_registration_and_schema():
     check(legacy.H3LongVideo.INPUT_TYPES()["required"][
               "legacy_plan_padding"][0] == "STRING",
           "legacy LLM position is not an inert migration string")
-    check(new_names[len(expected_base):] == ["detail_refinement", "save_raw_segments"],
-          "native detail widgets were not appended after drift removal")
+    check(new_names[len(expected_base):] == ["save_raw_segments"],
+          "native detail widget was not appended after drift removal")
     optional = legacy.H3LongVideo.INPUT_TYPES()["optional"]
     check("二采设置" in optional and "refine_model" not in optional and
           "detail_settings" not in optional,
@@ -294,7 +294,7 @@ def _detail_settings(enabled=True, resolution="928P", model=None):
 
 
 def _expand(task, ref_video=None, overlap=22,
-            detail_refinement=legacy.DETAIL_NATIVE, model=None, sampler=None,
+            model=None, sampler=None,
             steps=8, scheduler="simple", denoise=1.0,
             drift_method="off", drift_strength=0.0, detail_settings=None):
     h3 = SimpleNamespace(video_vae=object(), audio_vae=object())
@@ -319,7 +319,6 @@ def _expand(task, ref_video=None, overlap=22,
         drift_method=drift_method,
         drift_strength=drift_strength,
         ref_image_size="匹配生成分辨率",
-        detail_refinement=detail_refinement,
         **{"二采设置": detail_settings},
         save_segments=False,
         ref_video=ref_video,
@@ -354,8 +353,6 @@ def test_dynamic_expansion():
           "first segment audio was not normalised to video duration")
     check(not any("MotionContext" in kind for kind in kinds),
           "third-party MotionContext remains in expansion")
-    check("ExtendIntermediateSigmas" not in kinds,
-          "detail refinement must remain off by default")
     check("MiniMaxH3SigmaShift" not in kinds,
           "official H3 AV sigma shifts must not be rewritten")
     check("SplitSigmasDenoise" not in kinds,
@@ -373,36 +370,7 @@ def test_dynamic_expansion():
               "H3Condition ref_video does not come from per-segment slice")
 
 
-def test_low_sigma_refinement():
-    graph = _expand(
-        legacy.TASK_FRESH,
-        detail_refinement=legacy.DETAIL_BALANCED)
-    refiners = [node for node in graph.values()
-                if node["class_type"] == "ExtendIntermediateSigmas"]
-    samplers = [node for node in graph.values()
-                if node["class_type"] == "H3SamplerAdvanced"]
-    check(len(refiners) == 2, "each segment needs one sigma refiner")
-    check(len(samplers) == 2, "refinement must not duplicate the sampler")
-    for node in refiners:
-        inputs = node["inputs"]
-        check(inputs["steps"] == 2, "balanced subdivision changed")
-        check(inputs["start_at_sigma"] == 0.8, "wrong refine start")
-        check(inputs["end_at_sigma"] == 0.0, "wrong refine end")
-        check(inputs["spacing"] == "cosine", "wrong refine spacing")
-    for node in samplers:
-        link = node["inputs"]["sigmas"]
-        check(graph[link[0]]["class_type"] == "ExtendIntermediateSigmas",
-              "sampler bypassed the refined sigma schedule")
-    kinds = [node["class_type"] for node in graph.values()]
-    check("MiniMaxH3SigmaShift" not in kinds, "H3 shift was overridden")
-    check("SplitSigmasDenoise" not in kinds, "schedule was split in two")
-    strong = legacy.detail_refinement_params(legacy.DETAIL_STRONG)
-    check(strong == {"steps": 3, "start_at_sigma": 0.8,
-                     "end_at_sigma": 0.0, "spacing": "cosine"},
-          "strong refinement profile changed")
-
-
-def test_second_pass_detail_refinement():
+def test_second_pass_detail_pipeline():
     check(any("nvidia_rtx_vsr" in str(m) for m in detail.DETAIL_UPSCALE_METHODS),
           "NVIDIA RTX VSR option was removed from the detail pass")
     settings = _detail_settings(True, "832P", object())
@@ -600,14 +568,6 @@ def test_turbo_schedule_contract():
           "Turbo model still rejected or replaced manual NFE")
     must_fail("scheduler=simple", scheduler="beta")
     must_fail("denoise=1.0", denoise=0.8)
-    graph = _expand(
-        legacy.TASK_FRESH, model=result[0],
-        sampler=SimpleNamespace(sampler_function=sample_euler),
-        detail_refinement=legacy.DETAIL_BALANCED)
-    check(not any(node["class_type"] == "ExtendIntermediateSigmas"
-                  for node in graph.values()),
-          "Turbo did not automatically suppress low-sigma refinement")
-
     def sample_res_multistep(*args, **kwargs):
         return None
 
@@ -677,8 +637,7 @@ if __name__ == "__main__":
         test_aimdo_headroom_does_not_raise_pin_budget,
         test_trim,
         test_dynamic_expansion,
-        test_low_sigma_refinement,
-        test_second_pass_detail_refinement,
+        test_second_pass_detail_pipeline,
         test_turbo_schedule_contract,
         test_direct_reference_condition,
     ]

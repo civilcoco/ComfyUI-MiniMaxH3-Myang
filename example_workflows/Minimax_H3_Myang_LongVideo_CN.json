@@ -3601,14 +3601,6 @@
           "widget": {
             "name": "segment_prefix"
           }
-        },
-        {
-          "name": "detail_refinement",
-          "type": "COMBO",
-          "link": null,
-          "widget": {
-            "name": "detail_refinement"
-          }
         }
       ],
       "outputs": [
@@ -3656,7 +3648,7 @@
           "ref_image_size",
           "save_segments",
           "segment_prefix",
-          "detail_refinement"
+          "save_raw_segments"
         ]
       },
       "widgets_values": [
@@ -3677,7 +3669,6 @@
         "匹配素材（原尺寸）",
         true,
         "video/H3_长视频",
-        "关闭（H3原生轨迹）",
         false
       ],
       "widgets_values_named": {
@@ -3698,7 +3689,6 @@
         "ref_image_size": "匹配素材（原尺寸）",
         "save_segments": true,
         "segment_prefix": "video/H3_长视频",
-        "detail_refinement": "关闭（H3原生轨迹）",
         "save_raw_segments": false
       }
     },

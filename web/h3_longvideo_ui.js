@@ -665,7 +665,6 @@ function refresh(node) {
     setVisible(by.prompt_mode, false);
     setVisible(by.media_prefix, false);
     setVisible(by.legacy_plan_padding, false);
-    setVisible(by.detail_refinement, false);
     setVisible(by.segment_prefix, by.save_segments?.value !== false);
 
     // This frontend materialises every widget as an input slot as well, so a

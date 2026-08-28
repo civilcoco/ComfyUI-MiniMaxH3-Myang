@@ -117,7 +117,7 @@ WIDGET_NAMES = {
         "task_mode", "resolution", "aspect_ratio", "width",
         "height", "steps", "denoise", "scheduler", "noise_seed", "__control_after_generate",
         "context_length", "prompt_mode", "media_prefix", "llm_service", "ref_image_size",
-        "save_segments", "segment_prefix", "detail_refinement", "save_raw_segments",
+        "save_segments", "segment_prefix", "save_raw_segments",
     ],
     "H3Loader": [
         "ref2va_model", "fl2va_model", "text_encoder", "video_vae", "audio_vae",
@@ -135,9 +135,6 @@ WIDGET_NAMES = {
 }
 NAMES_PROP = "myang_widget_names"
 WIDGET_DEFAULTS = {
-    "H3LongVideo": {
-        "detail_refinement": "关闭（H3原生轨迹）",
-    },
     "H3DetailSettings": {
         "upscale_method": "nvidia_rtx_vsr",
         "resolution": "768P",
@@ -154,7 +151,6 @@ WIDGET_DEFAULTS = {
 }
 
 LONG_INPUT_SPECS = {
-    "detail_refinement": ("COMBO", None),
     "二采设置": ("MYANG_H3_DETAIL", 7),
 }
 
@@ -667,8 +663,7 @@ def repair_long_inputs(data):
         for name, (typ, shape) in LONG_INPUT_SPECS.items():
             if name in present:
                 continue
-            slot = io(name, typ, shape=shape,
-                      widget=name if name == "detail_refinement" else None)
+            slot = io(name, typ, shape=shape)
             inputs.append(slot)
             added.append((node["id"], name))
     return added
