@@ -17,7 +17,7 @@ TEXT_SUFFIXES = {
 }
 MEDIA_SUFFIXES = {".gif", ".jpeg", ".jpg", ".m4a", ".mov", ".mp3", ".mp4", ".png", ".wav", ".webm", ".webp"}
 REQUIRED_FILES = {
-    "LICENSE", "NOTICE", "README.md", "LEGAL.md", "SECURITY.md",
+    "LICENSE", "NOTICE", "README.md", "LEGAL.md",
     "THIRD_PARTY_NOTICES.md", "pyproject.toml", ".comfyignore",
 }
 IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache"}

@@ -18,6 +18,3 @@ pwsh tools\run_tests.ps1 -ComfyRoot "D:\path\to\ComfyUI"
 
 If ComfyUI uses a dedicated Python environment, also pass its interpreter with
 `-Python "D:\path\to\python.exe"`.
-
-Do not report secrets or a working exploit in a public issue. See
-[SECURITY.md](SECURITY.md) first.
