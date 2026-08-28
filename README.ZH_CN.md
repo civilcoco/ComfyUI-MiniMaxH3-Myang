@@ -60,8 +60,9 @@ git clone https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang.git
 - audio VAE；
 - 对应任务所需的可选 LoRA 或放大模型。
 
-本包没有强制安装的 Python 第三方依赖。只有在 Media Agent 中选择本地 Whisper 转写时，
-才需要单独安装 `openai-whisper`。
+除 ComfyUI 标准运行环境外，本包核心功能不声明额外 Python 包。只有在 Media Agent 中
+选择本地 Whisper 转写时，才需要单独安装 `openai-whisper`；NVIDIA RTX VSR 路径还需要
+用户另行安装 NVIDIA VFX 运行时。
 
 ## 快速开始
 
@@ -81,9 +82,9 @@ git clone https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang.git
 
 [`example_workflows/Minimax_H3_Myang_LongVideo_CN.json`](example_workflows/Minimax_H3_Myang_LongVideo_CN.json)
 
-这个示例展示了外围优化节点。VideoHelperSuite、SolAttn、Spectrum、EasyCache、
-SageAttention、KJNodes/PreviewAny 等属于可选集成，不是本包的 Python 导入依赖。
-缺少这些节点时，可以安装对应节点包，也可以删除或旁路相关优化链路。
+这个示例还使用了 VideoHelperSuite、KJNodes、SolAttn、Spectrum、ReservedVRAM 和
+Easy-Use 的可选节点。它们不是本包的 Python 导入依赖；需要哪条外围链路就安装对应
+节点包，也可以删除或旁路不用的节点。
 
 两个示例都已清除私人素材路径、提示词、输出名和种子。打开后请重新选择自己的文件与模型。
 
@@ -166,7 +167,7 @@ A/B，再根据素材表现测试其他长度。
 ## Turbo 与低 Sigma 精修
 
 “沐阳 H3 · Turbo LoRA 联合音画加载调度”调用 ComfyUI 的 LoRA 加载器，并设置 H3
-视频与音频的配套 shift。
+视频与音频的配套 shift。本包当前实现的档位如下：
 
 | LightX2V 档位 | video/audio shift | 推理 NFE | 训练分辨率 |
 |---|---:|---:|---|
@@ -178,6 +179,13 @@ A/B，再根据素材表现测试其他长度。
 Turbo 使用固定 NFE 轨迹，需配合 `simple` scheduler、`denoise=1.0` 和 Euler 采样器。
 低 Sigma 插点会改变该轨迹，因此两者不能同时启用。纯生成优先使用 FL2VA/T2VA 档位，
 动作迁移优先使用 Ref2VA 档位。
+
+上游可能继续发布其他权重。v0.1.0 尚未为上游的 **8-step v1.0 768P** 权重提供独立档位，
+请勿对它使用文件名 Auto 识别。除非已经自行验证手动 shift，否则只使用上表档位，或等待
+本包显式支持该权重的后续版本。
+
+Turbo 节点也提供可选的 TE-Speed 与 Spectrum 缓存模式。它们需要用户另行安装对应的相邻
+自定义节点包；未找到时，本包会给出警告并关闭该缓存继续运行。
 
 参数依据：
 [LightX2V 模型页](https://huggingface.co/lightx2v/Minimax-h3-Turbo) 和

@@ -63,8 +63,9 @@ Provide your own copies of:
 - an audio VAE;
 - any optional LoRA or upscaler required by your chosen path.
 
-The package has no mandatory third-party Python dependency. Install `openai-whisper` only when you
-select local Whisper transcription in the Media Agent.
+The core package declares no additional Python packages beyond the standard ComfyUI environment.
+Install `openai-whisper` only when you select local Whisper transcription in the Media Agent. The
+NVIDIA RTX VSR path requires a separately installed NVIDIA VFX runtime.
 
 ## Quick start
 
@@ -85,9 +86,9 @@ For a graph with individually wired stages, open:
 
 [`example_workflows/Minimax_H3_Myang_LongVideo_CN.json`](example_workflows/Minimax_H3_Myang_LongVideo_CN.json)
 
-That example also demonstrates optional optimizers. VideoHelperSuite, SolAttn, Spectrum, EasyCache,
-SageAttention, KJNodes/PreviewAny, and similar packs are optional integrations, not Python import
-dependencies of Myang. Install them if you want those branches, or bypass/remove the corresponding nodes.
+That example also demonstrates optional integrations from VideoHelperSuite, KJNodes, SolAttn,
+Spectrum, ReservedVRAM, and Easy-Use. They are not Python import dependencies of Myang. Install the
+packages needed by the branches you use, or bypass/remove those nodes.
 
 Both examples have been sanitized. Select your own model names, media, prompts, output name, and seed after loading.
 
@@ -173,7 +174,7 @@ described by the next shot's prompt; it is not a black frame, flash, or post-pro
 ## Turbo and low-sigma refinement
 
 `沐阳 H3 · Turbo LoRA 联合音画加载调度` calls ComfyUI's LoRA loader and applies the paired H3
-video/audio shifts.
+video/audio shifts. The following table lists the presets implemented by this package:
 
 | LightX2V preset | Video/audio shift | Inference NFE | Training resolution |
 |---|---:|---:|---|
@@ -185,6 +186,15 @@ video/audio shifts.
 Turbo follows a fixed NFE trajectory and requires the `simple` scheduler, `denoise=1.0`, and an Euler
 sampler. Low-sigma insertion changes that trajectory, so the two modes cannot be enabled together.
 Prefer an FL2VA/T2VA preset for generation and a Ref2VA preset for motion transfer.
+
+The upstream project may publish additional checkpoints. In v0.1.0, the upstream **8-step v1.0
+768P** checkpoint has no dedicated Myang profile; do not use filename-based Auto detection for it.
+Use only a preset listed above unless you have independently validated a manual shift, or wait for a
+package update that adds the checkpoint explicitly.
+
+The Turbo node also exposes optional TE-Speed and Spectrum cache modes. They require separately
+installed sibling custom-node packages; when one is unavailable, Myang warns and continues with that
+cache disabled.
 
 Preset sources:
 [LightX2V model page](https://huggingface.co/lightx2v/Minimax-h3-Turbo) and

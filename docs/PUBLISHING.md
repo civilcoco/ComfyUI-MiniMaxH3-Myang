@@ -1,11 +1,12 @@
 # 发布指南
 
-当前源码已经整理为发布候选版。GitHub 仓库 Owner 与 Comfy Registry Publisher ID
-均为 `civilcoco`，作者及 Publisher 显示名称为“沐阳Myang”。Publisher ID 会成为
-Registry 中的永久标识，不要随意更换。
+本指南用于发布 ComfyUI-MiniMaxH3-Myang。GitHub 仓库 Owner 与 Comfy Registry
+Publisher ID 均为 `civilcoco`，作者及 Publisher 显示名称为“沐阳Myang”。
+Publisher ID 会成为 Registry 中的永久标识，不要随意更换。
 
 不要把 Registry 发布令牌、模型服务 API Key 或个人素材提交到仓库。Registry API Key
-只保存为 GitHub Actions Secret，名称固定为 `REGISTRY_ACCESS_TOKEN`。
+如果用于 GitHub Actions，只保存为名称固定为 `REGISTRY_ACCESS_TOKEN` 的仓库 Secret；
+如果使用本地 CLI，只在命令提示时粘贴，不要写入仓库文件。
 
 ## 推荐发布方式：GitHub Actions
 
@@ -59,12 +60,10 @@ comfy node publish
 在节点包目录运行：
 
 ```powershell
-python tools/release_audit.py --strict-metadata
-node --experimental-default-type=module tests/test_storyboard_cards.mjs
-node --experimental-default-type=module tests/test_progress_state.mjs
+pwsh tools\run_tests.ps1 -ComfyRoot "D:\你的路径\ComfyUI"
 ```
 
-运行完整本地回归：
+如果 ComfyUI 使用专用 Python，再显式指定解释器：
 
 ```powershell
 pwsh tools/run_tests.ps1 `
@@ -78,16 +77,15 @@ Python 回归需要导入 ComfyUI 和 PyTorch，因此应使用实际 ComfyUI �
 ## GitHub 与 Registry 发布顺序
 
 1. 运行严格发布审计，确认不再出现身份占位符警告。
-2. 在节点包目录初始化 Git，把默认分支设为 `main`。
-3. 检查待提交文件，确认没有 `release-excluded`、模型权重、生成媒体、缓存、
+2. 检查待提交文件，确认没有 `release-excluded`、模型权重、生成媒体、缓存、
    API Key、个人路径或私人素材。
-4. 提交已经清洗的源码，并推送到 `pyproject.toml` 中填写的 GitHub 仓库。
-5. 在全新克隆的仓库中重新运行发布审计和测试。
-6. 在干净的 ComfyUI 环境中打开两个示例工作流，检查缺失节点提示和基础连线。
-7. 创建带说明的 `v0.1.0` 标签，并发布 GitHub Release。
-8. 在 GitHub Actions 中手动运行 `Publish to Comfy Registry`；也可以使用
+3. 提交已经清洗的源码，并推送到 `pyproject.toml` 中填写的 GitHub 仓库。
+4. 在全新克隆的仓库中重新运行发布审计和测试。
+5. 在干净的 ComfyUI 环境中打开两个示例工作流，检查缺失节点提示和基础连线。
+6. 创建带说明的 `v0.1.0` 标签，并发布 GitHub Release。
+7. 在 GitHub Actions 中手动运行 `Publish to Comfy Registry`；也可以使用
    `comfy node publish` 作为本地备用方式。
-9. 确认用户能够通过 Registry 或 ComfyUI-Manager 安装，并检查发布包内容。
+8. 确认用户能够通过 Registry 或 ComfyUI-Manager 安装，并检查发布包内容。
 
 `.comfyignore` 会从 Registry 安装包中排除测试、研究记录、开发工具和 CI 配置，
 同时保留许可证、第三方声明、运行代码、前端文件和示例工作流。

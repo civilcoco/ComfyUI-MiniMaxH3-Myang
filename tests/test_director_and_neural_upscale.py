@@ -1073,7 +1073,7 @@ def test_director_example_workflow_is_compact_and_wired():
     workflow = json.loads(path.read_text(encoding="utf-8"))
     nodes = {node["id"]: node for node in workflow["nodes"]}
     directors = [node for node in nodes.values() if node["type"] == "H3Director"]
-    check(len(directors) == 1 and len(nodes) == 8,
+    check(len(directors) == 1 and len(nodes) == 7,
           "Director example is missing or no longer compact")
     director_node = directors[0]
     linked_inputs = {item["name"] for item in director_node["inputs"]

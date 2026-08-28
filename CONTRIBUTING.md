@@ -10,12 +10,14 @@ Contributions are welcome under GPL-3.0-only.
    redistribution license.
 4. Preserve provenance when adapting code. Add the source project, revision,
    copyright and license to `THIRD_PARTY_NOTICES.md`.
-5. Run both CPU regression suites before opening a pull request.
+5. Run the full regression suite before opening a pull request.
 
 ```powershell
-pwsh ComfyUI\custom_nodes\ComfyUI-MiniMaxH3-Myang\tools\run_tests.ps1 `
-  -ComfyRoot ComfyUI
+pwsh tools\run_tests.ps1 -ComfyRoot "D:\path\to\ComfyUI"
 ```
 
+If ComfyUI uses a dedicated Python environment, also pass its interpreter with
+`-Python "D:\path\to\python.exe"`.
+
 Do not report secrets or a working exploit in a public issue. See
-`SECURITY.md` first.
+[SECURITY.md](SECURITY.md) first.

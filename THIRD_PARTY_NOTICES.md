@@ -32,11 +32,8 @@ The full GPL-3.0 license is provided in `LICENSE`.
 - Use here: `latent_upscale_3d.py` adapts the repository's in-package 3D H3
   latent-upscaler runtime and checkpoint contract. Myang adds its own temporal
   memory bound, precision controls, canvas validation and GPU-offload policy.
-  The Director UI and execution node in this repository were written for the
-  existing Myang pipeline; the upstream repository was used as product and
-  architecture reference, including the per-shot material workflow, rather
-  than copied wholesale. Myang's implementation stores portable ComfyUI input
-  references and resolves them through its own Media Agent-compatible bundle.
+  The Director UI, execution node and per-shot media workflow in this repository
+  are Myang implementations and are not copied from this source.
 
 The Apache-2.0 license copy is provided in `LICENSES/Apache-2.0.txt`.
 
@@ -63,7 +60,9 @@ does not currently have sufficient provenance and permission to do so.
 ### ComfyUI
 
 - Source: https://github.com/Comfy-Org/ComfyUI
-- Tested revision: `43cb4fffc89bba20ab7bd61467a36d0339338dab`
+- Tested releases:
+  - v0.33.2: `7cee3ceb1a35503172e0dfb8dbdbdedee2aba8aa`
+  - v0.34.0: `12d5279438bfefc058a269eae805ceab6047777f`
 - License: GPL-3.0
 - Use here: runtime APIs and the official MiniMax H3 nodes/model interfaces.
 
@@ -86,6 +85,15 @@ the base model's separate restrictions.
 - Use here: optional runtime compatibility detection. No SolAttn source is
   copied or bundled.
 
+### Optional speed-cache integrations
+
+- `TE-Speed-MiniMaxH3`: `turbo.py` can discover a separately installed sibling
+  package with this exact directory name. No source file or model is bundled;
+  if it is absent, Myang warns and continues without that cache.
+- [ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3):
+  optional Spectrum cache discovery under the same no-bundling and fallback
+  behavior.
+
 ### ComfyUI-Prompt-Assistant
 
 - Source: https://github.com/yawiii/ComfyUI-Prompt-Assistant
@@ -100,20 +108,3 @@ the base model's separate restrictions.
 runtime. This repository does not distribute NVIDIA SDK files, binaries or
 models. Users are responsible for installing them and accepting NVIDIA's
 applicable terms.
-
-## Workflow-only inspiration
-
-- The user-supplied “NanFeng H3 V4 Public Package” workflow was used to identify
-  low-sigma schedule densification as an experiment. No file or code from that
-  package is redistributed.
-- The user-supplied “二采重绘放大版” workflow was used to study the general
-  low-resolution first pass → pixel upscale → VAE encode → low-denoise second
-  pass pipeline. Its JSON is not redistributed.
-- `wjluoxiao/ComfyUI-JZL-MiniMax-H3` (MIT, audited revision
-  `7719a53ca79ae47325cd483a0b62d1974483ad20`) was reviewed for its reference
-  area multiplier and V3 Autogrow interface. No JZL source file is copied; the
-  current JZL repository does not implement the second-pass sampler used here.
-
-Their licenses were not available in the publication workspace. Do not add
-their original JSON, screenshots, documentation or assets to this repository
-without first obtaining a compatible license or explicit permission.

@@ -26,9 +26,9 @@
 色彩漂移校正，以及可选 Turbo/低 Sigma/二采放大。
 
 代码许可证：GPL-3.0-only。
-部分锚点逻辑改编自 NikoDemon80/ComfyUI-H3-Motion-Context（GPL-3.0）；
-部分媒体归一化与引用编辑兼容逻辑改编自
-Media Agent 与 LLM 辅助逻辑为 ComfyUI-MiniMaxH3-Myang 自有实现。
+段间锚点实现包含从 NikoDemon80/ComfyUI-H3-Motion-Context（GPL-3.0）
+改编并继续开发的代码；Media Agent 与 LLM/VLM 辅助逻辑由
+ComfyUI-MiniMaxH3-Myang 直接实现。
 完整来源见仓库 THIRD_PARTY_NOTICES.md。
 
 模型权重不包含在仓库内。MiniMax H3 模型与输出受单独的社区许可证约束，
