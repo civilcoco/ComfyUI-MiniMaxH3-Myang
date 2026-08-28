@@ -1,7 +1,7 @@
 {
   "id": "myang-h3-director-example",
   "revision": 0,
-  "last_node_id": 8,
+  "last_node_id": 7,
   "last_link_id": 9,
   "nodes": [
     {
@@ -985,39 +985,6 @@
       },
       "color": "#222",
       "bgcolor": "#000"
-    },
-    {
-      "id": 8,
-      "type": "MarkdownNote",
-      "pos": [
-        30,
-        950
-      ],
-      "size": [
-        870,
-        130
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "title": "作者署名",
-      "properties": {
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "## 作者署名\n\n**沐阳Myang** · Bilibili：沐阳Myang · GitHub：civilcoco"
-      ],
-      "widgets_values_named": {
-        "text": "## 作者署名\n\n**沐阳Myang** · Bilibili：沐阳Myang · GitHub：civilcoco"
-      },
-      "color": "#243047",
-      "bgcolor": "#182033"
     }
   ],
   "links": [

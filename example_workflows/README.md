@@ -1,7 +1,7 @@
 # Example workflow
 
 Author and maintainer: **沐阳Myang**
-Bilibili: **沐阳Myang**
+Bilibili: [**沐阳Myang**](https://space.bilibili.com/506587111)
 GitHub: [@civilcoco](https://github.com/civilcoco)
 
 `Minimax_H3_Myang_LongVideo_CN.json` is a sanitized copy of the author's full

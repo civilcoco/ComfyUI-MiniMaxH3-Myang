@@ -1,6 +1,6 @@
 # v0.1.0 发布状态
 
-更新时间：2026-08-27
+更新时间：2026-08-28
 
 ## 已完成
 
@@ -15,6 +15,8 @@
 - 已合并版本后缀节点模块并删除不可达兼容代码；完整回归同时通过 ComfyUI
   v0.33.2 与 v0.34.0。
 - Git 已初始化，默认分支为 `main`，首版源码已完成本地提交。
+- `main` 已推送到 GitHub，并已配置手动触发的 Comfy Registry 发布 Action；本地无需
+  安装 `comfy-cli`。
 
 ## 外部节点依赖审计
 
@@ -28,7 +30,7 @@ H3-FaceRefine 开关、运行时调用及跳过式集成测试。发布包不再
 - [x] Comfy Registry Publisher 已创建，Publisher ID 为 `civilcoco`，显示名称为“沐阳Myang”。
 - [x] 已运行 `python tools/release_audit.py --strict-metadata`，严格审计通过。
 - [ ] 在干净的 ComfyUI 环境中打开两个已清洗的示例工作流。
-- [ ] 将本地 `main` 分支推送到 GitHub。
 - [ ] 创建 `v0.1.0` 标签和 GitHub Release。
-- [ ] 完成第一次手动 Comfy Registry 发布，再决定是否启用自动发布。
+- [ ] 在 GitHub 仓库中创建 `REGISTRY_ACCESS_TOKEN` Secret。
+- [ ] 手动运行 Comfy Registry 发布 Action，并验证 Registry/Manager 安装包。
 - [ ] 全球公开 H3 生成演示片段前，取得适当许可或 MiniMax 的书面说明。

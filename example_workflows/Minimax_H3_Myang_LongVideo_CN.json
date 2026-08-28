@@ -1,7 +1,7 @@
 {
   "id": "bb1942e3-d15d-44b0-9b58-0e20af15af32",
   "revision": 0,
-  "last_node_id": 1798,
+  "last_node_id": 1797,
   "last_link_id": 1503,
   "nodes": [
     {
@@ -4001,39 +4001,6 @@
         "刷新 Skill 列表": null
       },
       "title": "MiniMax H3 Media Agent"
-    },
-    {
-      "id": 1798,
-      "type": "MarkdownNote",
-      "pos": [
-        3969.716027857566,
-        -90
-      ],
-      "size": [
-        560,
-        130
-      ],
-      "flags": {},
-      "order": 37,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "title": "作者署名",
-      "properties": {
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "## 作者署名\n\n**沐阳Myang** · Bilibili：沐阳Myang · GitHub：civilcoco"
-      ],
-      "widgets_values_named": {
-        "text": "## 作者署名\n\n**沐阳Myang** · Bilibili：沐阳Myang · GitHub：civilcoco"
-      },
-      "color": "#243047",
-      "bgcolor": "#182033"
     }
   ],
   "links": [

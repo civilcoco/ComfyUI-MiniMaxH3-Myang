@@ -15,9 +15,10 @@
 
 - [x] Create a publisher at https://registry.comfy.org/.
 - [x] Put the immutable publisher id (`civilcoco`) in `pyproject.toml`.
-- [ ] Validate metadata with `comfy node init`/Registry tooling.
+- [x] Validate the completed `pyproject.toml` with the strict release audit.
+- [x] Add a manually triggered Registry publishing workflow.
 - [ ] Store `REGISTRY_ACCESS_TOKEN` only as a GitHub Actions secret.
-- [ ] Publish manually first; automate after the initial package is verified.
+- [ ] Run the publishing workflow manually and verify the first Registry package.
 
 Official instructions:
 https://docs.comfy.org/registry/publishing
