@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 /*
  * Media Agent UI for ComfyUI-MiniMaxH3-Myang.
@@ -54,64 +55,60 @@ function installSummaryViewerNode(nodeType, nodeData, comfyApp) {
 
 const AGENT_CLASS = "MiniMaxH3MediaAgent";
 const AGENT_MEDIA_PROP = "myang_h3_asset_sources_v2";
+const LEGACY_AGENT_MEDIA_PROP = "minimax_h3_agent_media_connections";
 const MAX_MEDIA = 15;
 const MAX_SKILL_BYTES = 512 * 1024;
 const MEDIA_KINDS = new Set(["IMAGE", "VIDEO", "AUDIO", "*"]);
-const MEDIA_TAG_RE = /<(Picture|Video|Audio)\s+(\d+)>/gi;
 const SETTINGS_NAMESPACE = "Myang_node.MiniMaxH3";
 const LEGACY_SETTINGS_NAMESPACE = "ComfyUI.MiniMaxH3";
+const SETTINGS_CATEGORY = ["Myang_node", "MiniMax H3"];
+
+function settingsCategory(itemName) {
+    // ComfyUI treats the last category entry as the setting leaf. Reusing only
+    // the first two entries makes later settings replace earlier ones.
+    return [...SETTINGS_CATEGORY, itemName];
+}
+
+function routeStatusPresentation(route = {}) {
+    const runtime = route?.runtime && typeof route.runtime === "object" ? route.runtime : {};
+    const status = route?.enabled === false ? "disabled" : String(runtime.status || "ready");
+    const remaining = Math.max(0, Number(runtime.cooldown_remaining || 0));
+    const reasons = {
+        quota_exhausted: "工作区额度耗尽",
+        quota_retry: "额度响应，等待后自动重试",
+        rate_limit: "TPM / 速率限制",
+        timeout: "首个有效内容等待超时",
+        connection: "连接失败",
+        stream: "流式连接中断或响应损坏",
+        empty: "服务端返回空正文",
+        auth: "API Key 鉴权失败",
+        server: "服务端暂时异常",
+    };
+    const reason = reasons[String(runtime.reason || "")] || String(runtime.reason || "");
+    if (status === "disabled") return {
+        label: "已停用", title: "该线路不会参与请求",
+        color: "#a1a1aa", border: "#52525b", background: "#27272a",
+    };
+    if (status === "blocked") return {
+        label: "额度阻断", title: `${reason || "额度不可用"}${remaining ? `，约 ${remaining.toFixed(0)} 秒后重试` : ""}`,
+        color: "#fecaca", border: "#b91c1c", background: "#450a0a",
+    };
+    if (status === "cooling") return {
+        label: `冷却 ${remaining.toFixed(0)}s`, title: `${reason || "线路暂时冷却"}，会自动切换其他线路`,
+        color: "#fde68a", border: "#a16207", background: "#422006",
+    };
+    if (status === "active") return {
+        label: "调用中", title: "当前请求正在使用这条线路",
+        color: "#bfdbfe", border: "#2563eb", background: "#172554",
+    };
+    return {
+        label: "可用", title: reason || "线路可参与自动路由",
+        color: "#bbf7d0", border: "#15803d", background: "#052e16",
+    };
+}
 
 function settingId(name) {
     return `${SETTINGS_NAMESPACE}.${name}`;
-}
-
-function routeStatusPresentation(route) {
-    const runtime = route?.runtime || {};
-    const status = String(runtime.status || "ready").toLowerCase();
-    const remaining = Math.max(0, Number(runtime.cooldown_remaining || 0));
-    if (status === "disabled") {
-        return {
-            label: "已停用",
-            title: "线路已停用",
-            color: "#888",
-            border: "#555",
-            background: "#25252d",
-        };
-    }
-    if (status === "blocked") {
-        return {
-            label: remaining > 0 ? `配额阻断 ${Math.ceil(remaining)}s` : "配额阻断",
-            title: runtime.reason || "线路因配额耗尽暂时阻断",
-            color: "#ff9f43",
-            border: "#8d5b25",
-            background: "#392b1d",
-        };
-    }
-    if (status === "cooling") {
-        return {
-            label: remaining > 0 ? `冷却中 ${Math.ceil(remaining)}s` : "冷却中",
-            title: runtime.reason || "线路暂时冷却，故障转移会尝试其他线路",
-            color: "#ffd866",
-            border: "#8d7626",
-            background: "#38331e",
-        };
-    }
-    if (status === "ready" || status === "active") {
-        return {
-            label: "可用",
-            title: "线路可用",
-            color: "#a9dc76",
-            border: "#527a37",
-            background: "#24331f",
-        };
-    }
-    return {
-        label: "未知",
-        title: runtime.reason || `未识别的线路状态：${status}`,
-        color: "#cfcfcf",
-        border: "#666",
-        background: "#2a2a32",
-    };
 }
 
 function migratedSettingDefault(name, fallback, parse = (value) => value) {
@@ -210,6 +207,10 @@ function isMediaSourceUsable(source) {
 
 function mediaConnections(node) {
     node.properties ||= {};
+    if (!Array.isArray(node.properties[AGENT_MEDIA_PROP])
+        && Array.isArray(node.properties[LEGACY_AGENT_MEDIA_PROP])) {
+        node.properties[AGENT_MEDIA_PROP] = node.properties[LEGACY_AGENT_MEDIA_PROP];
+    }
     if (!Array.isArray(node.properties[AGENT_MEDIA_PROP])) node.properties[AGENT_MEDIA_PROP] = [];
     return node.properties[AGENT_MEDIA_PROP];
 }
@@ -325,7 +326,8 @@ function syncAgentConnectionsFromNativeLinks(node) {
     for (let index = 0; index < node.inputs.length; index += 1) {
         const input = node.inputs[index];
         const inputName = String(input?.name || "");
-        if (!/^asset_\d+$/.test(inputName)) continue;
+        if (!/^asset_\d+$/.test(inputName)
+            && inputName !== "media" && !/^media_\d+$/.test(inputName)) continue;
 
         const linkIds = [];
         if (Array.isArray(input.links) && input.links.length > 0) {
@@ -356,6 +358,24 @@ function syncAgentConnectionsFromNativeLinks(node) {
     }
 
     if (next.length > 0) {
+        // Native links tell us which sources are still connected, but their
+        // input order is not the user's semantic slot order.  Keep the saved
+        // connection order for surviving sources so a Director drag/drop
+        // operation is not undone on the next graph serialization.  Newly
+        // connected sources are appended in native-link order.
+        const previous = mediaConnections(node).slice();
+        const previousOrder = new Map(previous.map((entry, index) => [
+            subjectKey(entry), index,
+        ]));
+        next.sort((left, right) => {
+            const leftIndex = previousOrder.get(subjectKey(left));
+            const rightIndex = previousOrder.get(subjectKey(right));
+            if (leftIndex == null && rightIndex == null) return 0;
+            if (leftIndex == null) return 1;
+            if (rightIndex == null) return -1;
+            return leftIndex - rightIndex;
+        });
+        next.forEach((entry, index) => { entry.order = index + 1; });
         setMediaConnections(node, next.slice(0, MAX_MEDIA));
         return mediaConnections(node);
     }
@@ -506,8 +526,11 @@ function patchGraphToPrompt() {
             if (!promptNode) continue;
             promptNode.inputs ||= {};
             delete promptNode.inputs.catalog;
+            delete promptNode.inputs.media;
             for (let index = 1; index <= MAX_MEDIA; index += 1) {
                 delete promptNode.inputs[`asset_${index}`];
+                delete promptNode.inputs[`media_${index}`];
+                delete promptNode.inputs[`media_type_${index}`];
             }
             // Only keep connections whose source actually survived into the
             // prompt (muted/bypassed loaders are pruned by ComfyUI). Filtering
@@ -523,7 +546,7 @@ function patchGraphToPrompt() {
             // media type plus the filename/label, which cannot be recovered
             // from a decoded tensor.
             promptNode.inputs.asset_manifest_json = JSON.stringify(
-                connections.map((connection, index) => ({...connection, slot: index + 1})),
+                connections.map((connection, index) => ({ ...connection, slot: index + 1 })),
             );
         }
         return promptData;
@@ -602,9 +625,9 @@ async function openSkillManagerModal(node = null) {
 
     const box = document.createElement("div");
     box.style.cssText = `
-        width: 720px;
+        width: 980px;
         max-width: 92vw;
-        height: 560px;
+        height: 700px;
         max-height: 88vh;
         background: #181822;
         border: 1px solid #333348;
@@ -620,32 +643,51 @@ async function openSkillManagerModal(node = null) {
     box.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; padding-bottom:10px;">
             <div style="font-size:16px; font-weight:bold; color:#00e2bb; display:flex; align-items:center; gap:8px;">
-                <span>⚙️ Agent 技能管理面板</span>
+                <span>Agent 技能管理面板</span>
             </div>
             <button class="h3-close-btn" style="background:transparent; border:none; color:#aaa; font-size:20px; cursor:pointer;">✖</button>
         </div>
 
-        <div style="display:flex; gap:10px; align-items:center; background:#222230; padding:10px; border-radius:6px;">
-            <label style="font-size:13px; color:#78dce8; font-weight:bold; white-space:nowrap;">选择 Skill 预设：</label>
-            <select class="h3-skill-select" style="flex:1; background:#121218; color:#fff; border:1px solid #444; border-radius:4px; padding:6px 10px; font-size:13px;"></select>
-            <button class="h3-new-btn" style="background:#00e2bb; color:#111; font-weight:bold; border:none; border-radius:4px; padding:6px 14px; cursor:pointer; font-size:12px;">➕ 新建 Skill</button>
-            <button class="h3-del-btn" style="background:#ff6188; color:#fff; font-weight:bold; border:none; border-radius:4px; padding:6px 14px; cursor:pointer; font-size:12px;">🗑️ 删除此 Skill</button>
-            <button class="h3-learn-btn" style="background:#ffd866; color:#111; font-weight:bold; border:none; border-radius:4px; padding:6px 14px; cursor:pointer; font-size:12px;">🧠 学习此 Skill</button>
-            <button class="h3-learn-all-btn" style="background:#ab9df2; color:#111; font-weight:bold; border:none; border-radius:4px; padding:6px 14px; cursor:pointer; font-size:12px;">🧠 学习全部</button>
-            <button class="h3-upload-dir-btn" style="background:#a9dc76; color:#111; font-weight:bold; border:none; border-radius:4px; padding:6px 14px; cursor:pointer; font-size:12px;">📁 导入技能目录</button>
+        <div style="display:grid;grid-template-columns:minmax(240px,1fr) repeat(5,132px);gap:8px;align-items:center;background:#222230;padding:10px;border-radius:6px;">
+            <label style="grid-column:1 / -1;font-size:13px;color:#78dce8;font-weight:bold;white-space:nowrap;">选择 Skill 预设：</label>
+            <select class="h3-skill-select" style="grid-column:1;min-width:0;height:44px;background:#121218;color:#fff;border:1px solid #444;border-radius:4px;padding:6px 10px;font-size:13px;"></select>
+            <button class="h3-new-btn" style="width:132px;height:44px;background:#00e2bb;color:#111;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:12px;">新建 Skill</button>
+            <button class="h3-del-btn" style="width:132px;height:44px;background:#ff6188;color:#fff;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:12px;">删除此 Skill</button>
+            <button class="h3-learn-btn" style="width:132px;height:44px;background:#ffd866;color:#111;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:12px;">学习此 Skill</button>
+            <button class="h3-learn-all-btn" style="width:132px;height:44px;background:#ab9df2;color:#111;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:12px;">学习全部</button>
+            <button class="h3-upload-dir-btn" style="width:132px;height:44px;background:#a9dc76;color:#111;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:12px;">导入技能目录</button>
         </div>
 
-        <div style="font-size:12px; color:#aaa; display:flex; justify-content:space-between;">
-            <span>Skill 内容编辑 (Markdown 格式)：</span>
-            <span class="h3-file-hint" style="color:#ffd866;"></span>
+        <div style="display:grid;grid-template-columns:112px minmax(260px,1fr) 132px 132px 132px;gap:8px;align-items:center;background:#222230;padding:10px;border-radius:6px;">
+            <label style="font-size:13px;color:#78dce8;font-weight:bold;white-space:nowrap;">学习用 LLM：</label>
+            <select class="h3-llm-select" style="min-width:0;height:44px;background:#121218;color:#fff;border:1px solid #444;border-radius:4px;padding:6px 10px;font-size:13px;"></select>
+            <button class="h3-route-btn" style="width:132px;height:44px;background:#78dce8;color:#111;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:12px;">线路设置</button>
+            <button class="h3-refresh-llm-btn" style="width:132px;height:44px;background:#4b5563;color:#fff;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:12px;">刷新服务</button>
+            <button class="h3-stop-learn-btn" style="width:132px;height:44px;background:#7f1d1d;color:#fecaca;font-weight:bold;border:1px solid #b91c1c;border-radius:4px;cursor:pointer;font-size:12px;">停止学习</button>
+            <span class="h3-route-status" style="grid-column:2 / -1;font-size:11px;color:#9ca3af;min-height:16px;"></span>
+            <div class="h3-llm-live" style="grid-column:1 / -1;display:flex;gap:10px;align-items:center;min-height:24px;border-top:1px solid #343445;padding-top:7px;font-size:11px;">
+                <span class="h3-llm-live-phase" style="flex:0 0 auto;border:1px solid #475569;border-radius:999px;padding:2px 7px;color:#94a3b8;">流式诊断等待中</span>
+                <span class="h3-llm-live-text" style="color:#cbd5e1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">学习开始后会显示探测轮次、线路、首内容、正文/思考字数和结束原因</span>
+            </div>
         </div>
-        <textarea class="h3-skill-editor" style="flex:1; background:#101016; color:#a9dc76; border:1px solid #333; border-radius:6px; padding:12px; font-family:Consolas, Monaco, monospace; font-size:13px; line-height:1.5; resize:none; outline:none;"></textarea>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #333;">
+            <div style="display:flex;gap:4px;">
+                <button class="h3-source-tab" style="height:40px;min-width:112px;background:#78dce8;color:#111;font-weight:bold;border:none;border-radius:5px 5px 0 0;cursor:pointer;">技能原文</button>
+                <button class="h3-digest-tab" style="height:40px;min-width:112px;background:#292936;color:#ddd;font-weight:bold;border:none;border-radius:5px 5px 0 0;cursor:pointer;">中文总结</button>
+            </div>
+            <span class="h3-file-hint" style="font-size:12px;color:#ffd866;"></span>
+        </div>
+        <textarea class="h3-skill-editor" aria-label="技能原文" style="flex:1;min-height:180px;background:#101016;color:#a9dc76;border:1px solid #333;border-radius:6px;padding:12px;font-family:Consolas,Monaco,monospace;font-size:13px;line-height:1.5;resize:none;outline:none;"></textarea>
+        <div class="h3-digest-meta" aria-live="polite" style="display:none;color:#a5b4fc;background:#1d2030;border:1px solid #34384c;border-radius:6px;padding:8px 12px;font-size:12px;line-height:1.5;"></div>
+        <textarea class="h3-digest-view" aria-label="中文学习总结" placeholder="这个技能还没有学习总结。可以先选择上方 LLM 学习，也可以直接在这里编写后保存。" style="display:none;flex:1;min-height:180px;background:#101016;color:#dbeafe;border:1px solid #333;border-radius:6px;padding:14px;font-family:Consolas,Monaco,monospace;font-size:13px;line-height:1.65;resize:none;outline:none;"></textarea>
 
         <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid #333; padding-top:10px;">
             <span class="h3-status-msg" style="font-size:12px; color:#ffd866;"></span>
             <div style="display:flex; gap:10px;">
                 <button class="h3-cancel-btn" style="background:#333; color:#fff; border:none; border-radius:4px; padding:8px 18px; cursor:pointer; font-size:13px;">关闭</button>
-                <button class="h3-save-btn" style="background:#78dce8; color:#111; font-weight:bold; border:none; border-radius:4px; padding:8px 24px; cursor:pointer; font-size:13px;">💾 保存文件</button>
+                <button class="h3-save-btn" style="min-width:132px;height:44px;background:#78dce8;color:#111;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:13px;">保存文件</button>
+                <button class="h3-save-digest-btn" hidden style="min-width:132px;height:44px;background:#a9dc76;color:#111;font-weight:bold;border:none;border-radius:4px;cursor:pointer;font-size:13px;">保存总结</button>
             </div>
         </div>
     `;
@@ -660,13 +702,174 @@ async function openSkillManagerModal(node = null) {
     const closeBtn = box.querySelector(".h3-close-btn");
     const cancelBtn = box.querySelector(".h3-cancel-btn");
     const saveBtn = box.querySelector(".h3-save-btn");
+    const saveDigestBtn = box.querySelector(".h3-save-digest-btn");
     const newBtn = box.querySelector(".h3-new-btn");
     const delBtn = box.querySelector(".h3-del-btn");
     const learnBtn = box.querySelector(".h3-learn-btn");
     const learnAllBtn = box.querySelector(".h3-learn-all-btn");
     const uploadDirBtn = box.querySelector(".h3-upload-dir-btn");
+    const llmSelectEl = box.querySelector(".h3-llm-select");
+    const routeBtn = box.querySelector(".h3-route-btn");
+    const refreshLlmBtn = box.querySelector(".h3-refresh-llm-btn");
+    const stopLearnBtn = box.querySelector(".h3-stop-learn-btn");
+    const routeStatusEl = box.querySelector(".h3-route-status");
+    const livePhaseEl = box.querySelector(".h3-llm-live-phase");
+    const liveTextEl = box.querySelector(".h3-llm-live-text");
+    const sourceTab = box.querySelector(".h3-source-tab");
+    const digestTab = box.querySelector(".h3-digest-tab");
+    const digestMeta = box.querySelector(".h3-digest-meta");
+    const digestView = box.querySelector(".h3-digest-view");
 
     let currentSkills = [];
+    const llmStorageKey = settingId("SkillManagerLLMService");
+
+    const onSkillLlmStream = (event) => {
+        const detail = event?.detail || {};
+        const phaseLabels = {
+            queued: "已排队", route_attempt: "尝试线路", route_retry_round: "30秒复查", connecting: "连接中",
+            connected: "已连接", waiting_first_byte: "等待首内容", waiting_generation: "等待生成",
+            reasoning: "正在思考", streaming: "正在接收",
+            stream_complete: "流已结束", stream_ignored: "普通整包",
+            stream_fallback: "整包回退", route_switch: "切换线路", cooldown_wait: "限流等待",
+            routes_unavailable: "线路不可用", route_error: "线路失败",
+            failed: "请求失败", cancelled: "已停止", done: "完成",
+        };
+        livePhaseEl.textContent = phaseLabels[detail.phase] || String(detail.phase || "状态更新");
+        const parts = [detail.service, detail.model, detail.route].filter(Boolean);
+        if (detail.elapsed != null) parts.push(`${Number(detail.elapsed).toFixed(1)}s`);
+        if (detail.route_rounds > 1) parts.push(`第${Number(detail.route_round) || 1}/${Number(detail.route_rounds)}轮`);
+        if (detail.route_count) parts.push(`线路${Number(detail.route_index) || 1}/${Number(detail.route_count)}`);
+        if (detail.first_output_timeout) parts.push(`首内容≤${Number(detail.first_output_timeout)}s`);
+        if (detail.first_chunk_after != null) parts.push(`首内容 ${Number(detail.first_chunk_after).toFixed(1)}s`);
+        else if (["connected", "waiting_first_byte"].includes(detail.phase)) parts.push("尚无有效内容");
+        if (detail.content_chars != null) parts.push(`正文 ${Number(detail.content_chars) || 0}字`);
+        if (detail.reasoning_chars != null) parts.push(`思考 ${Number(detail.reasoning_chars) || 0}字`);
+        if (detail.waiting_until_complete) parts.push("等待服务端完整结束");
+        if (detail.finish_reason) parts.push(`结束 ${detail.finish_reason}`);
+        if (detail.error_reason) parts.push(`原因 ${detail.error_reason}`);
+        const message = String(detail.message || "").replace(/\s+/g, " ").trim();
+        if (message) parts.push(message);
+        liveTextEl.textContent = parts.join(" · ");
+        liveTextEl.title = liveTextEl.textContent;
+    };
+    api.addEventListener("myh3_llm_stream", onSkillLlmStream);
+
+    function setSkillTab(tabName) {
+        const digestActive = tabName === "digest";
+        editorEl.style.display = digestActive ? "none" : "block";
+        digestMeta.style.display = digestActive ? "block" : "none";
+        digestView.style.display = digestActive ? "block" : "none";
+        saveBtn.hidden = digestActive;
+        saveDigestBtn.hidden = !digestActive;
+        sourceTab.style.background = digestActive ? "#292936" : "#78dce8";
+        sourceTab.style.color = digestActive ? "#ddd" : "#111";
+        digestTab.style.background = digestActive ? "#78dce8" : "#292936";
+        digestTab.style.color = digestActive ? "#111" : "#ddd";
+    }
+
+    async function loadDigest(name = selectEl.value) {
+        if (!name || name === "none") {
+            digestMeta.textContent = "请选择一个技能。";
+            digestView.value = "";
+            digestView.disabled = true;
+            saveDigestBtn.disabled = true;
+            return;
+        }
+        digestMeta.textContent = "正在读取学习总结…";
+        digestView.disabled = true;
+        saveDigestBtn.disabled = true;
+        try {
+            const res = await fetch(`/minimax-h3-agent/digest?name=${encodeURIComponent(name)}`);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || String(res.status));
+            const methodNames = {
+                llm: "LLM 精炼完成",
+                llm_partial: data.pending_merge ? "LLM 分块已完成、待合并" : "LLM 分块续学中",
+                manual: "用户手动总结",
+                file: "技能原文直通",
+                reference_media_agent: "旧版 Media Agent 学习结果",
+                legacy_skill_memory: "旧版技能记忆迁移",
+            };
+            const method = methodNames[data.learned_by] || data.learned_by || "尚未学习";
+            const completed = Number(data.completed_chunks || 0);
+            const pending = Number(data.pending_chunks || 0);
+            const progress = pending ? ` ｜ 分块进度 ${completed}/${completed + pending}，待续学 ${pending} 段` : "";
+            digestMeta.textContent = `学习方式：${method} ｜ 原文 ${Number(data.chars || 0).toLocaleString()} 字符 ｜ 总结 ${Number(data.digest_chars || 0).toLocaleString()} 字符${progress}`;
+            digestView.value = String(data.digest || "");
+            digestView.disabled = false;
+            saveDigestBtn.disabled = false;
+        } catch (err) {
+            digestMeta.textContent = `读取总结失败：${err.message}`;
+            digestView.value = "";
+            digestView.disabled = true;
+            saveDigestBtn.disabled = true;
+        }
+        saveDigestBtn.style.opacity = saveDigestBtn.disabled ? "0.4" : "1";
+    }
+
+    async function loadLlmServices() {
+        const previous = llmSelectEl.value
+            || (node ? String(getWidget(node, "llm_service")?.value || "") : "")
+            || migratedSettingDefault("SkillManagerLLMService", "");
+        llmSelectEl.disabled = true;
+        llmSelectEl.replaceChildren();
+        try {
+            const res = await fetch("/minimax-h3-agent/llm-config");
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || String(res.status));
+            const options = [];
+            let enabledRoutes = 0;
+            let readyRoutes = 0;
+            let coolingRoutes = 0;
+            for (const service of data.services || []) {
+                const label = String(service.name || service.id || "").trim();
+                for (const model of service.llm_models || []) {
+                    if (label && model?.name) options.push(`${label} :: ${model.name}`);
+                }
+                enabledRoutes += Number(service.runtime?.enabled_routes || 0);
+                readyRoutes += Number(service.runtime?.ready_routes || 0);
+                coolingRoutes += Number(service.runtime?.cooling_routes || 0);
+            }
+            for (const value of options) {
+                const option = document.createElement("option");
+                option.value = value;
+                option.textContent = value;
+                llmSelectEl.appendChild(option);
+            }
+            if (previous && options.includes(previous)) llmSelectEl.value = previous;
+            else if (options.length) llmSelectEl.value = options[0];
+            routeStatusEl.textContent = options.length
+                ? `已载入 ${options.length} 个 LLM 模型；线路 ${readyRoutes}/${enabledRoutes} 可用${coolingRoutes ? `，${coolingRoutes} 条冷却中` : ""}`
+                : "尚未配置 LLM 服务，请打开线路设置添加服务、模型和 API Key 路由。";
+        } catch (err) {
+            routeStatusEl.textContent = `LLM 服务读取失败：${err.message}`;
+        } finally {
+            llmSelectEl.disabled = llmSelectEl.options.length === 0;
+        }
+    }
+
+    sourceTab.onclick = () => setSkillTab("source");
+    digestTab.onclick = async () => {
+        setSkillTab("digest");
+        await loadDigest();
+    };
+    llmSelectEl.onchange = () => {
+        try { localStorage.setItem(llmStorageKey, llmSelectEl.value || ""); } catch (_error) { /* no-op */ }
+    };
+    routeBtn.onclick = () => openLLMConfigModal();
+    refreshLlmBtn.onclick = () => loadLlmServices();
+    stopLearnBtn.onclick = async () => {
+        stopLearnBtn.disabled = true;
+        try {
+            const res = await fetch("/minimax-h3-agent/llm-stop", {method: "POST"});
+            const data = await res.json().catch(() => ({}));
+            statusEl.textContent = data.message || (res.ok ? "停止请求已发送" : `停止失败：${res.status}`);
+        } catch (err) {
+            statusEl.textContent = `停止失败：${err.message}`;
+        } finally {
+            stopLearnBtn.disabled = false;
+        }
+    };
 
     async function loadSkills(selectName = null) {
         try {
@@ -696,15 +899,19 @@ async function openSkillManagerModal(node = null) {
             hintEl.textContent = "未选择任何 Skill 预设";
             delBtn.disabled = true;
             saveBtn.disabled = true;
+            saveDigestBtn.disabled = true;
         } else {
             editorEl.disabled = false;
             saveBtn.disabled = false;
             editorEl.value = found ? found.content || "" : "";
             hintEl.textContent = found?.deletable ? "自定义可编辑/删除预设" : "系统内置默认预设";
             delBtn.disabled = !found || !found.deletable;
+            saveDigestBtn.disabled = false;
         }
         delBtn.style.opacity = delBtn.disabled ? "0.4" : "1";
         saveBtn.style.opacity = saveBtn.disabled ? "0.4" : "1";
+        saveDigestBtn.style.opacity = saveDigestBtn.disabled ? "0.4" : "1";
+        loadDigest(name);
     }
 
     selectEl.onchange = onSelectChange;
@@ -731,6 +938,36 @@ async function openSkillManagerModal(node = null) {
             }
         } catch (err) {
             statusEl.textContent = `保存错误: ${err.message}`;
+        }
+    };
+
+    saveDigestBtn.onclick = async () => {
+        const name = selectEl.value;
+        if (!name || name === "none") {
+            statusEl.textContent = "请先选择一个有效的 Skill";
+            return;
+        }
+        saveDigestBtn.disabled = true;
+        saveDigestBtn.style.opacity = "0.5";
+        statusEl.style.color = "#ffd866";
+        statusEl.textContent = `正在保存 ${name} 的中文总结…`;
+        try {
+            const res = await fetch("/minimax-h3-agent/digest", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name, digest: digestView.value }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.success) throw new Error(data.error || String(res.status));
+            statusEl.style.color = "#a9dc76";
+            statusEl.textContent = `✅ ${data.message || "中文总结已保存"}；后续生成将优先使用这个版本`;
+            await loadDigest(name);
+        } catch (err) {
+            statusEl.style.color = "#ff6188";
+            statusEl.textContent = `保存总结失败: ${err.message}`;
+        } finally {
+            saveDigestBtn.disabled = false;
+            saveDigestBtn.style.opacity = "1";
         }
     };
 
@@ -789,9 +1026,9 @@ async function openSkillManagerModal(node = null) {
     // pipeline chapters that dilute the rules that actually shape the output.
     async function runLearn(payload, label) {
         const buttons = [learnBtn, learnAllBtn];
-        const llmService = node ? String(getWidget(node, "llm_service")?.value || "") : "";
+        const llmService = String(llmSelectEl.value || "");
         if (!llmService) {
-            statusEl.textContent = "未找到 llm_service，请先在节点上选择 LLM 服务";
+            statusEl.textContent = "请先在上方选择学习用 LLM；如果列表为空，请进入线路设置完成配置";
             return;
         }
         const unload = node ? Boolean(getWidget(node, "ollama_auto_unload")?.value) : false;
@@ -807,15 +1044,30 @@ async function openSkillManagerModal(node = null) {
             if (data.success) {
                 const ok = (data.results || []).filter((item) => item.success);
                 const viaLlm = ok.filter((item) => item.learned_by === "llm").length;
+                const partial = ok.filter((item) => item.partial || item.learned_by === "llm_partial");
                 const raw = ok.reduce((sum, item) => sum + Number(item.chars || 0), 0);
                 const digest = ok.reduce((sum, item) => sum + Number(item.digest_chars || 0), 0);
                 const failed = (data.results || []).filter((item) => !item.success);
-                let text = `✅ 已学习 ${data.learned}/${data.total}（LLM 精炼 ${viaLlm} 个）`;
+                let text;
+                if (partial.length) {
+                    const first = partial[0];
+                    const completed = Number(first.completed_chunks || 0);
+                    const pending = Number(first.pending_chunks || 0);
+                    const partialLabel = first.pending_merge ? "待完成总合并" : `待续学 ${partial.length} 个`;
+                    text = `⚠️ 已保存 ${data.learned}/${data.total} 个技能的学习进度（完整精炼 ${viaLlm} 个，${partialLabel}）`;
+                    if (completed || pending) text += ` ｜ 当前分块 ${completed}/${completed + pending}`;
+                    statusEl.style.color = "#ffd866";
+                } else {
+                    text = `✅ 已完成学习 ${data.learned}/${data.total}（LLM 精炼 ${viaLlm} 个）`;
+                    statusEl.style.color = "#a9dc76";
+                }
                 if (digest) text += ` ｜ ${raw.toLocaleString()} → ${digest.toLocaleString()} 字符`;
                 if (failed.length) text += ` ｜ 失败 ${failed.length}: ${failed[0].error || ""}`;
                 const notes = ok.flatMap((item) => item.notes || []);
                 if (notes.length) text += ` ｜ 注意: ${notes[0]}`;
                 statusEl.textContent = text;
+                await loadDigest(selectEl.value);
+                setSkillTab("digest");
             } else {
                 const first = (data.results || []).find((item) => !item.success);
                 statusEl.textContent = `学习失败: ${data.error || first?.error || "未知错误"}`;
@@ -841,7 +1093,7 @@ async function openSkillManagerModal(node = null) {
     };
 
     uploadDirBtn.onclick = async () => {
-        const dirPath = window.prompt("请输入技能导入目录或其相对路径：\n（管理员必须先设置 MINIMAX_H3_SKILLS_IMPORT_DIR；只允许导入该目录内的 UTF-8 文本技能）");
+        const dirPath = window.prompt("请输入技能目录的完整路径：\n（目录下的 .md/.txt/.json/.yaml/.yml 文件和技能包目录将被导入）");
         if (!dirPath || !dirPath.trim()) return;
         statusEl.textContent = "📁 正在导入技能目录...";
         uploadDirBtn.disabled = true;
@@ -873,11 +1125,17 @@ async function openSkillManagerModal(node = null) {
         }
     };
 
-    const close = () => dialog.remove();
+    const close = () => {
+        api.removeEventListener?.("myh3_llm_stream", onSkillLlmStream);
+        dialog.remove();
+    };
     closeBtn.onclick = close;
     cancelBtn.onclick = close;
 
-    await loadSkills(node ? getWidget(node, "skill_preset")?.value : null);
+    await Promise.all([
+        loadSkills(node ? getWidget(node, "skill_preset")?.value : null),
+        loadLlmServices(),
+    ]);
 }
 
 async function openLLMConfigModal() {
@@ -885,7 +1143,7 @@ async function openLLMConfigModal() {
     dialog.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.75);z-index:10000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;";
 
     const box = document.createElement("div");
-    box.style.cssText = "width:1120px;max-width:96vw;height:760px;max-height:92vh;background:#181822;border:1px solid #333348;border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:12px;color:#e0e0e0;box-shadow:0 12px 40px rgba(0,0,0,0.6);";
+    box.style.cssText = "width:1120px;max-width:96vw;height:840px;max-height:94vh;background:#181822;border:1px solid #333348;border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:12px;color:#e0e0e0;box-shadow:0 12px 40px rgba(0,0,0,0.6);";
 
     let services = [];
     let aliases = {};
@@ -898,6 +1156,18 @@ async function openLLMConfigModal() {
                 <div class="llm-source" style="font-size:11px;color:#888;margin-top:3px;"></div>
             </div>
             <button class="llm-close" style="background:transparent;border:none;color:#aaa;font-size:20px;cursor:pointer;">✖</button>
+        </div>
+        <div class="llm-live" style="border:1px solid #334155;background:#111827;border-radius:7px;padding:9px 11px;display:grid;grid-template-columns:minmax(190px,1fr) auto;gap:6px 12px;">
+            <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+                <span style="font-size:11px;font-weight:bold;color:#78dce8;white-space:nowrap;">LLM 实时流式诊断</span>
+                <span class="llm-live-phase" style="font-size:10px;border:1px solid #475569;border-radius:999px;padding:2px 7px;color:#94a3b8;white-space:nowrap;">等待请求</span>
+                <span class="llm-live-route" style="font-size:10px;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+            </div>
+            <button class="llm-live-stop" style="grid-row:1 / span 2;background:#7f1d1d;color:#fecaca;border:1px solid #b91c1c;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:11px;white-space:nowrap;">停止当前 LLM</button>
+            <div style="display:flex;gap:12px;align-items:center;min-width:0;">
+                <span class="llm-live-metrics" style="font-size:10px;color:#94a3b8;white-space:nowrap;">发起请求后会显示探测轮次、线路、首内容、正文/思考字数与结束原因</span>
+                <span class="llm-live-preview" style="font-size:10px;color:#d1d5db;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;"></span>
+            </div>
         </div>
         <div style="display:flex;gap:12px;flex:1;min-height:0;">
             <div style="width:250px;display:flex;flex-direction:column;gap:6px;background:#222230;border-radius:6px;padding:10px;">
@@ -926,6 +1196,82 @@ async function openLLMConfigModal() {
     const cancelBtn = box.querySelector(".llm-cancel");
     const saveBtn = box.querySelector(".llm-save");
     const addSvcBtn = box.querySelector(".llm-add-svc");
+    const livePhaseEl = box.querySelector(".llm-live-phase");
+    const liveRouteEl = box.querySelector(".llm-live-route");
+    const liveMetricsEl = box.querySelector(".llm-live-metrics");
+    const livePreviewEl = box.querySelector(".llm-live-preview");
+    const liveStopBtn = box.querySelector(".llm-live-stop");
+
+    const livePhasePresentation = (phase) => ({
+        queued: ["已排队", "#94a3b8"],
+        route_attempt: ["尝试线路", "#fbbf24"],
+        route_retry_round: ["30秒复查", "#f59e0b"],
+        connecting: ["连接中", "#fbbf24"],
+        connected: ["已连接", "#60a5fa"],
+        waiting_first_byte: ["等待首内容", "#60a5fa"],
+        waiting_generation: ["等待生成", "#60a5fa"],
+        reasoning: ["正在思考", "#c084fc"],
+        streaming: ["正在接收", "#34d399"],
+        stream_complete: ["流已结束", "#34d399"],
+        stream_ignored: ["普通整包", "#a78bfa"],
+        stream_fallback: ["整包回退", "#f59e0b"],
+        route_switch: ["切换线路", "#f59e0b"],
+        cooldown_wait: ["限流等待", "#f59e0b"],
+        routes_unavailable: ["线路不可用", "#fb7185"],
+        route_error: ["线路失败", "#fb7185"],
+        failed: ["请求失败", "#fb7185"],
+        cancelled: ["已停止", "#fb7185"],
+        done: ["完成", "#86efac"],
+    }[String(phase || "")] || [String(phase || "等待请求"), "#94a3b8"]);
+
+    const onLlmStream = (event) => {
+        const detail = event?.detail || {};
+        const [label, color] = livePhasePresentation(detail.phase);
+        livePhaseEl.textContent = label;
+        livePhaseEl.style.color = color;
+        livePhaseEl.style.borderColor = color;
+        const serviceModel = [detail.service, detail.model].filter(Boolean).join(" / ");
+        const route = detail.route ? ` · ${detail.route}` : "";
+        liveRouteEl.textContent = `${serviceModel}${route}`;
+        liveRouteEl.title = liveRouteEl.textContent;
+        const metrics = [];
+        if (Number.isFinite(Number(detail.elapsed))) metrics.push(`${Number(detail.elapsed).toFixed(1)}s`);
+        if (detail.route_rounds > 1) metrics.push(`第${Number(detail.route_round) || 1}/${Number(detail.route_rounds)}轮`);
+        if (detail.route_count) metrics.push(`线路${Number(detail.route_index) || 1}/${Number(detail.route_count)}`);
+        if (detail.first_output_timeout) metrics.push(`首内容≤${Number(detail.first_output_timeout)}s`);
+        if (detail.first_chunk_after != null) metrics.push(`首内容 ${Number(detail.first_chunk_after).toFixed(1)}s`);
+        else if (["connected", "waiting_first_byte"].includes(detail.phase)) metrics.push("尚无有效内容");
+        if (detail.content_chars != null) metrics.push(`正文 ${Number(detail.content_chars) || 0}字`);
+        if (detail.reasoning_chars != null) metrics.push(`思考 ${Number(detail.reasoning_chars) || 0}字`);
+        if (detail.waiting_until_complete) metrics.push("活跃流等待完成");
+        if (detail.chunks) metrics.push(`${Number(detail.chunks)}块`);
+        if (detail.finish_reason) metrics.push(`结束 ${detail.finish_reason}`);
+        if (detail.error_reason) metrics.push(`原因 ${detail.error_reason}`);
+        liveMetricsEl.textContent = metrics.join(" · ") || "等待服务端状态";
+        const preview = String(detail.message || detail.preview || "").replace(/\s+/g, " ").trim();
+        livePreviewEl.textContent = preview;
+        livePreviewEl.title = preview;
+    };
+    api.addEventListener("myh3_llm_stream", onLlmStream);
+
+    liveStopBtn.onclick = async () => {
+        if (liveStopBtn.disabled) return;
+        liveStopBtn.disabled = true;
+        liveStopBtn.textContent = "正在停止…";
+        try {
+            const response = await api.fetchApi("/minimax-h3-agent/llm-stop", {
+                method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || result.success !== true) throw new Error(result.error || `HTTP ${response.status}`);
+            livePreviewEl.textContent = result.message || `已请求停止 ${Number(result.stopped || 0)} 个请求`;
+        } catch (error) {
+            livePreviewEl.textContent = `停止失败：${error.message}`;
+        } finally {
+            liveStopBtn.disabled = false;
+            liveStopBtn.textContent = "停止当前 LLM";
+        }
+    };
 
     const STY = "background:#121218;color:#fff;border:1px solid #444;border-radius:4px;padding:6px 10px;font-size:13px;width:100%;box-sizing:border-box;";
     const LBL = "font-size:12px;color:#78dce8;font-weight:bold;margin-bottom:3px;display:block;";
@@ -1024,7 +1370,14 @@ async function openLLMConfigModal() {
         const llmRows = (svc.llm_models || []).map((m, i) => modelRow(m, i, "llm")).join("");
         const vlmRows = (svc.vlm_models || []).map((m, i) => modelRow(m, i, "vlm")).join("");
         svc.routes = Array.isArray(svc.routes) ? svc.routes : [];
-        const routeRows = svc.routes.map((route, index) => routeRow(route, index)).join("");
+        const routeRows = svc.routes.map((route, index) => {
+            try {
+                return routeRow(route, index);
+            } catch (error) {
+                console.warn("[Myang LLM] 线路状态渲染降级", error);
+                return `<div class="route-card" data-idx="${index}" style="background:#191923;border:1px solid #7f1d1d;border-radius:6px;padding:10px;color:#fecaca;">线路 ${index + 1} 状态显示失败；仍可保存其他配置。</div>`;
+            }
+        }).join("");
         const canResetRuntime = Boolean(svc._original_id);
 
         editPanelEl.innerHTML = `
@@ -1044,7 +1397,7 @@ async function openLLMConfigModal() {
                 <div style="${ROW}"><label style="${LBL}">路由策略</label><select class="fld-route-strategy" style="${STY}">
                     <option value="round_robin" ${(svc.route_strategy || "round_robin") === "round_robin" ? "selected" : ""}>轮询 + 故障转移（推荐）</option>
                     <option value="failover" ${svc.route_strategy === "failover" ? "selected" : ""}>主线路优先 + 故障转移</option>
-                </select><div style="font-size:10px;color:#777;margin-top:3px;">429/TPM、连接、超时、鉴权或服务端故障会自动尝试下一组；普通请求参数错误不会盲目换线。</div></div>
+                </select><div style="font-size:10px;color:#777;margin-top:3px;">多线路先逐条快探（每线最多15秒）；仅当全部未开始输出时，再对慢启动线路逐条复查（最多30秒）。单线路直接等待30秒。正文或思考一旦开始就锁定该线路，等待完整结束或手动停止；429、额度、鉴权错误不会进入复查轮。</div></div>
                 <div class="route-groups" style="display:flex;flex-direction:column;gap:8px;">${routeRows}</div>
             </div>
             <div style="border-top:1px solid #444;padding-top:10px;margin-top:10px;">
@@ -1121,6 +1474,7 @@ async function openLLMConfigModal() {
         editPanelEl.querySelectorAll(".route-card").forEach((card) => {
             const index = parseInt(card.dataset.idx, 10);
             const route = svc.routes[index];
+            if (!route || !card.querySelector(".r-enabled")) return;
             card.querySelector(".r-enabled").onchange = (e) => { route.enabled = e.target.checked; renderSvcList(); };
             card.querySelector(".r-name").oninput = (e) => { route.name = e.target.value; };
             card.querySelector(".r-url").oninput = (e) => { route.base_url = e.target.value; };
@@ -1149,7 +1503,7 @@ async function openLLMConfigModal() {
 
         editPanelEl.querySelector(".add-llm").onclick = () => {
             svc.llm_models = svc.llm_models || [];
-            svc.llm_models.push({name:`new-model-${svc.llm_models.length + 1}`,is_default:svc.llm_models.length===0,temperature:0.7,max_tokens:0,top_p:0.9});
+            svc.llm_models.push({name:`new-model-${svc.llm_models.length + 1}`,is_default:svc.llm_models.length===0,temperature:0.7,max_tokens:0,top_p:0.9,stream:true,timeout:0});
             renderEditPanel(); renderSvcList();
         };
         editPanelEl.querySelector(".add-vlm").onclick = () => {
@@ -1175,6 +1529,16 @@ async function openLLMConfigModal() {
                 arr[idx].max_tokens = Number.isFinite(value) ? Math.max(0, value) : 0;
             };
             row.querySelector(".m-top-p").oninput = (e) => { arr[idx].top_p = parseFloat(e.target.value); };
+            const streamInput = row.querySelector(".m-stream");
+            if (streamInput) streamInput.onchange = (e) => {
+                arr[idx].stream = e.target.checked;
+                renderEditPanel();
+            };
+            const timeoutInput = row.querySelector(".m-timeout");
+            if (timeoutInput) timeoutInput.oninput = (e) => {
+                const value = parseInt(e.target.value, 10);
+                arr[idx].timeout = Number.isFinite(value) ? Math.max(0, Math.min(1800, value)) : 0;
+            };
             row.querySelector(".m-default").onchange = () => {
                 arr.forEach((model, modelIndex) => { model.is_default = modelIndex === idx; });
                 renderEditPanel();
@@ -1190,13 +1554,29 @@ async function openLLMConfigModal() {
 
     function modelRow(m, idx, type) {
         const MS = "background:#121218;color:#fff;border:1px solid #444;border-radius:3px;padding:4px 8px;font-size:12px;";
-        return `<div class="model-row" data-type="${type}" data-idx="${idx}" style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">
-            <input class="m-default" type="radio" name="${type}-default-${selectedIdx}" ${m.is_default ? "checked" : ""} title="设为默认模型">
-            <input class="m-name" style="${MS}flex:1;min-width:180px;" value="${escapeHtml(m.name || "")}" placeholder="模型名">
-            <input class="m-temp" style="${MS}width:52px;" value="${escapeHtml(String(m.temperature ?? 0.7))}" type="number" min="0" max="2" step="0.1" title="temperature">
-            <input class="m-top-p" style="${MS}width:52px;" value="${escapeHtml(String(m.top_p ?? 0.9))}" type="number" min="0.01" max="1" step="0.05" title="top_p">
-            <input class="m-max" style="${MS}width:76px;" value="${escapeHtml(String(m.max_tokens ?? 0))}" type="number" min="0" title="最大输出 token；0 = 不发送限制，由服务商/模型决定">
-            <button class="m-del" style="background:#ff6188;color:#fff;border:none;border-radius:3px;padding:4px 8px;cursor:pointer;font-size:11px;">🗑️</button>
+        const streamEnabled = m.stream !== false;
+        const streamOptions = type === "llm" ? `
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:5px 6px 1px 28px;font-size:10px;color:#a8b1c0;">
+                <label style="display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap;" title="边生成边接收，可实时看到线路轮次、正文/思考字数和结束原因；不兼容时会自动回退普通整包">
+                    <input class="m-stream" type="checkbox" ${streamEnabled ? "checked" : ""}> 流式传输（推荐）
+                </label>
+                ${streamEnabled ? `<span style="color:#86efac;white-space:nowrap;" title="协议空包不会命中；只有首个正文或思考内容才会锁定线路">流式首内容：多线路 15秒快探→30秒复查；单线路 30秒</span>` : ""}
+                <label style="display:flex;align-items:center;gap:6px;white-space:nowrap;opacity:${streamEnabled ? ".48" : "1"};" title="仅用于关闭流式后的普通整包请求；流式模式使用自动15/30秒策略">
+                    普通整包超时
+                    <input class="m-timeout" style="${MS}width:72px;" value="${escapeHtml(String(m.timeout ?? 0))}" type="number" min="0" max="1800" step="5" ${streamEnabled ? "disabled" : ""}>
+                    秒（0 自动）
+                </label>
+            </div>` : "";
+        return `<div class="model-row" data-type="${type}" data-idx="${idx}" style="display:flex;flex-direction:column;margin-bottom:7px;padding:${type === "llm" ? "5px" : "0"};background:${type === "llm" ? "#191923" : "transparent"};border:${type === "llm" ? "1px solid #333348" : "none"};border-radius:5px;">
+            <div style="display:flex;gap:6px;align-items:center;">
+                <input class="m-default" type="radio" name="${type}-default-${selectedIdx}" ${m.is_default ? "checked" : ""} title="设为默认模型">
+                <input class="m-name" style="${MS}flex:1;min-width:180px;" value="${escapeHtml(m.name || "")}" placeholder="模型名">
+                <input class="m-temp" style="${MS}width:52px;" value="${escapeHtml(String(m.temperature ?? 0.7))}" type="number" min="0" max="2" step="0.1" title="temperature">
+                <input class="m-top-p" style="${MS}width:52px;" value="${escapeHtml(String(m.top_p ?? 0.9))}" type="number" min="0.01" max="1" step="0.05" title="top_p">
+                <input class="m-max" style="${MS}width:76px;" value="${escapeHtml(String(m.max_tokens ?? 0))}" type="number" min="0" title="最大输出 token；0 = 不发送限制，由服务商/模型决定">
+                <button class="m-del" style="background:#ff6188;color:#fff;border:none;border-radius:3px;padding:4px 8px;cursor:pointer;font-size:11px;">🗑️</button>
+            </div>
+            ${streamOptions}
         </div>`;
     }
 
@@ -1259,7 +1639,10 @@ async function openLLMConfigModal() {
         }
     };
 
-    const close = () => dialog.remove();
+    const close = () => {
+        api.removeEventListener?.("myh3_llm_stream", onLlmStream);
+        dialog.remove();
+    };
     closeBtn.onclick = close;
     cancelBtn.onclick = close;
 
@@ -1364,11 +1747,15 @@ function installAgentWidgets(node) {
     node.__h3AgentWidgetsInstalled = true;
     const skillWidget = getWidget(node, "skill_preset");
     if (skillWidget) skillWidget.serializeValue = () => getWidget(node, "skill_preset")?.value || "none";
-    const linksWidget = getWidget(node, "asset_manifest_json");
-    if (linksWidget) {
+    for (const transportName of ["asset_manifest_json", "media_links_json"]) {
+        const linksWidget = getWidget(node, transportName);
+        if (!linksWidget) continue;
         linksWidget.hidden = true;
         linksWidget.computeSize = () => [0, -4];
-        linksWidget.serializeValue = () => JSON.stringify(syncAgentConnectionsFromNativeLinks(node));
+        linksWidget.serializeValue = () => JSON.stringify(
+            syncAgentConnectionsFromNativeLinks(node).map(
+                (connection, index) => ({ ...connection, slot: index + 1 })),
+        );
     }
     // The skill manager dialog owns Skill editing now, so the inline textarea is
     // redundant. It stays declared and serialised rather than being deleted:
@@ -1416,13 +1803,12 @@ function installAgentWidgets(node) {
     }, 100);
 }
 
-const AGENT_TRANSPORT_INPUT_RE = /^(catalog|asset_\d+|asset_manifest_json)$/;
+const AGENT_TRANSPORT_INPUT_RE = /^(catalog|asset_\d+|asset_manifest_json|media|media_\d+|media_type_\d+|media_links_json)$/;
 
 function pruneAgentTransportInputs(nodeData) {
     // asset_* and asset_manifest_json are transport-only inputs that
-    // graphToPrompt fills in. Keeping them in the node definition would show 15
-    // dead sockets plus a media-type text box the user is expected to type into;
-    // asset_1 is kept as the single starting dot and the rest grow on demand.
+    // graphToPrompt fills in. Legacy media_* inputs are retained only so saved
+    // workflows can be loaded and migrated without losing their connections.
     const optional = nodeData?.input?.optional;
     if (!optional) return;
     for (const name of Object.keys(optional)) {
@@ -1432,7 +1818,7 @@ function pruneAgentTransportInputs(nodeData) {
 }
 
 function isMediaSlot(input) {
-    return /^asset_\d+$/.test(String(input?.name || ""));
+    return /^(asset|media)(?:_\d+)?$/.test(String(input?.name || ""));
 }
 
 function isSlotLinked(input) {
@@ -1477,7 +1863,7 @@ function ensureAgentMediaSlots(node) {
         if (!isMediaSlot(input)) continue;
         ordinal += 1;
         input.name = `asset_${ordinal}`;
-        input.label = ordinal === 1 ? "media" : `media ${ordinal}`;
+        input.label = ordinal === 1 ? "素材" : `素材 ${ordinal}`;
         if (!input.type) input.type = "*";
     }
 }
@@ -1503,9 +1889,10 @@ function installAgentNode(nodeType, nodeData) {
 
     const originalConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function onConfigureH3Agent(info) {
-        // Guard the restored size across the widget rebuild below. Installing
-        // widgets and slots re-runs the audio-visibility pass, which would
-        // otherwise resize a node the user had already sized by hand.
+        // Guard the restored size across the widget rebuild below: installing
+        // widgets and slots re-runs the
+        // audio-visibility pass, which would otherwise resize a node that the
+        // user had already sized by hand.
         this.__h3RestoringLayout = true;
         const savedSize = Array.isArray(info?.size)
             ? [Number(info.size[0]) || 0, Number(info.size[1]) || 0]
@@ -1586,7 +1973,8 @@ app.registerExtension({
 
             app.ui.settings.addSetting({
                 id: settingId("DefaultSkillPreset"),
-                name: "沐阳 H3: 默认 Skill 预设 (Default Skill Preset)",
+                category: settingsCategory("默认 Skill 预设"),
+                name: "默认 Skill 预设",
                 type: "combo",
                 defaultValue: migratedSettingDefault("DefaultSkillPreset", "none"),
                 options: availableSkills.map((s) => ({ value: s, text: s, label: s })),
@@ -1599,7 +1987,8 @@ app.registerExtension({
 
             app.ui.settings.addSetting({
                 id: settingId("GlobalSkillText"),
-                name: "沐阳 H3: 全局 Skill 默认规则 (Global Skill Rules)",
+                category: settingsCategory("全局 Skill 默认规则"),
+                name: "全局 Skill 默认规则",
                 type: "text",
                 defaultValue: migratedSettingDefault("GlobalSkillText", ""),
                 multiline: true,
@@ -1610,7 +1999,8 @@ app.registerExtension({
 
             app.ui.settings.addSetting({
                 id: settingId("AutoUnloadOllama"),
-                name: "沐阳 H3: 默认自动卸载 Ollama 模型 (Auto Unload Ollama)",
+                category: settingsCategory("默认自动卸载 Ollama 模型"),
+                name: "默认自动卸载 Ollama 模型",
                 type: "boolean",
                 defaultValue: migratedSettingDefault(
                     "AutoUnloadOllama", true, (value) => value !== "false"),
@@ -1620,21 +2010,15 @@ app.registerExtension({
             });
 
             app.ui.settings.addSetting({
-                id: settingId("OpenSkillManager"),
-                name: "沐阳 H3: Agent技能管理 (预设编辑 / 新建 / 删除)",
-                type: "hidden",
-                defaultValue: "",
-            });
-
-            // Add a proper interactive button setting in ComfyUI Settings
-            app.ui.settings.addSetting({
                 id: settingId("OpenSkillManagerButton"),
-                name: "沐阳 H3: Agent技能管理",
+                category: settingsCategory("Agent 技能管理"),
+                name: "Agent 技能管理",
                 type: (name, setter, value) => {
                     const btn = document.createElement("button");
-                    btn.textContent = "⚙️ 打开 Agent技能管理 面板";
+                    btn.textContent = "打开 Agent 技能管理面板";
+                    btn.setAttribute("aria-label", "打开 Agent 技能管理面板");
                     btn.className = "comfy-btn";
-                    btn.style.cssText = "padding: 6px 14px; background: #78dce8; color: #111; font-weight: bold; border: none; border-radius: 4px; cursor: pointer;";
+                    btn.style.cssText = "min-width:240px;height:44px;padding:0 16px;background:#78dce8;color:#111;font-weight:bold;border:1px solid transparent;border-radius:6px;cursor:pointer;";
                     btn.onclick = () => openSkillManagerModal();
                     return btn;
                 },
@@ -1643,12 +2027,14 @@ app.registerExtension({
 
             app.ui.settings.addSetting({
                 id: settingId("OpenLLMConfigButton"),
-                name: "沐阳 H3: LLM 服务设置",
+                category: settingsCategory("LLM 服务设置"),
+                name: "LLM 服务设置",
                 type: (name, setter, value) => {
                     const btn = document.createElement("button");
-                    btn.textContent = "🔧 打开 LLM 服务设置 面板";
+                    btn.textContent = "打开 LLM 服务设置面板";
+                    btn.setAttribute("aria-label", "打开 LLM 服务设置面板");
                     btn.className = "comfy-btn";
-                    btn.style.cssText = "padding: 6px 14px; background: #a9dc76; color: #111; font-weight: bold; border: none; border-radius: 4px; cursor: pointer;";
+                    btn.style.cssText = "min-width:240px;height:44px;padding:0 16px;background:#a9dc76;color:#111;font-weight:bold;border:1px solid transparent;border-radius:6px;cursor:pointer;";
                     btn.onclick = () => openLLMConfigModal();
                     return btn;
                 },

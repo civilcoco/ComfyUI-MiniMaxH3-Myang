@@ -27,7 +27,7 @@ WORKFLOWS = COMFY / "user" / "default" / "workflows" / "minimax"
 
 # Carried over from the source graph.
 KEEP = {
-    "loader": 757,          # legacy source-workflow loader
+    "loader": 757,          # source graph's original model loader
     "model_tail": 667,      # LoraLoaderModelOnly, end of the patch chain
     "patch_head": 708,      # ReservedVRAMSetter, head of the patch chain
     "sampler_select": 123,  # KSamplerSelect
@@ -44,7 +44,7 @@ IMAGES = [137, 139, 151]
 # length. In a chained render that truncates the clip to the first segment, so
 # every later slice runs off the end. Replaced by the splitter's own count.
 DROP = [
-    757,   # legacy loader: replaced by our own H3Loader
+    757,   # original loader: replaced by the native H3Loader
     131,   # ComfyMathExpression: single-segment frame_load_cap
     132,   # PrimitiveFloat "Video Length (seconds)": its only consumer
     150, 159, 711, 765,   # rgthree bypassers keyed to groups that no longer exist
@@ -57,7 +57,7 @@ USAGE_NOTE = """## 长视频 · 循环版
 
 ### 提示词与素材流水线
 - **提示词 Agent**：负责剧本/提示词创作与素材理解（图片、视频、音频挂在它身上，能预览、能校验 `@图片1` / `@视频1`）。
-- **① 剧本/分段切片**：接收 Agent 节点的 `myang_prompt`（或手动粘贴剧本），由 LLM 按时间轴切分成各段提示词，打包进 `plan_json`。
+- **① 剧本/分段切片**：接收 Agent 节点的 `easy_prompt`（或手动粘贴剧本），由 LLM 按时间轴切分成各段提示词，打包进 `plan_json`。
 - **② 长视频生成**：只需接入 `plan_json` 与 `media`（无需再连 `prompt` 线），运行时直接消费 `plan_json` 内嵌的各段提示词。
 
 ### 三种任务模式（`②` 的 `task_mode`）
@@ -117,7 +117,7 @@ WIDGET_NAMES = {
         "task_mode", "resolution", "aspect_ratio", "width",
         "height", "steps", "denoise", "scheduler", "noise_seed", "__control_after_generate",
         "context_length", "prompt_mode", "media_prefix", "llm_service", "ref_image_size",
-        "save_segments", "segment_prefix", "save_raw_segments",
+        "save_segments", "segment_prefix", "detail_refinement", "save_raw_segments",
     ],
     "H3Loader": [
         "ref2va_model", "fl2va_model", "text_encoder", "video_vae", "audio_vae",
@@ -135,6 +135,9 @@ WIDGET_NAMES = {
 }
 NAMES_PROP = "myang_widget_names"
 WIDGET_DEFAULTS = {
+    "H3LongVideo": {
+        "detail_refinement": "关闭（H3原生轨迹）",
+    },
     "H3DetailSettings": {
         "upscale_method": "nvidia_rtx_vsr",
         "resolution": "768P",
@@ -144,13 +147,14 @@ WIDGET_DEFAULTS = {
         "detail_boost": "远景小物体与五官强化（推荐·兼容加速）",
     },
     "H3TurboSchedule": {
-        "speed_cache": "TE-Speed 时步缓存 (提速40%)",
+        "speed_cache": "关闭",
         "LoRA文件": "不在本节点加载（兼容旧工作流）",
         "LoRA强度": 1.0,
     },
 }
 
 LONG_INPUT_SPECS = {
+    "detail_refinement": ("COMBO", None),
     "二采设置": ("MYANG_H3_DETAIL", 7),
 }
 
@@ -176,11 +180,6 @@ LEGACY_WIDGETS = {
 }
 
 OUTPUT_NAMES = {
-    "MiniMaxH3MediaAgent": [
-        ("agent_prompt", "STRING"), ("summary_json", "STRING"),
-        ("media_manifest", "STRING"), ("media", "MINIMAX_H3_MEDIA"),
-        ("myang_prompt", "STRING"),
-    ],
     "H3Loader": [("h3", "MYANG_H3")],
     "H3Model": [("model", "MODEL")],
     "H3TurboSchedule": [
@@ -380,7 +379,7 @@ def build(src, dst, total_seconds, segment_seconds, overlap):
     def pick(i):
         return old[i] if len(old) > i else ""
 
-    # Older source workflows listed fl2va first, then ref2va, then the encoders.
+    # The Easy loader listed fl2va first, then ref2va, then the encoders.
     loader = b.make(
         "H3Loader", [], [("h3", "MYANG_H3")],
         [pick(1), pick(0), pick(2), pick(3), pick(4), "default"],
@@ -405,7 +404,7 @@ def build(src, dst, total_seconds, segment_seconds, overlap):
         [("model", "MODEL"), ("recommended_steps", "INT"),
          ("shift_video", "FLOAT"), ("shift_audio", "FLOAT")],
         ["LightX2V v1.0 · 8步（12/3·通用）",
-         "TE-Speed 时步缓存 (提速40%)", 12.0, 3.0, 8,
+         "关闭", 12.0, 3.0, 8,
          "不在本节点加载（兼容旧工作流）", 1.0],
         title="Turbo LoRA 联合音画调度", size=[390, 180])
     b.link(KEEP["model_tail"], 0, turbo, "model", "MODEL")
@@ -663,7 +662,8 @@ def repair_long_inputs(data):
         for name, (typ, shape) in LONG_INPUT_SPECS.items():
             if name in present:
                 continue
-            slot = io(name, typ, shape=shape)
+            slot = io(name, typ, shape=shape,
+                      widget=name if name == "detail_refinement" else None)
             inputs.append(slot)
             added.append((node["id"], name))
     return added
@@ -924,13 +924,6 @@ def update(dst):
         fixed.append((node.get("type"), missing))
 
     for node in data.get("nodes", []):
-        if node.get("type") == "MiniMaxH3MediaAgent":
-            for index, slot in enumerate(
-                    [slot for slot in node.get("inputs", [])
-                     if str(slot.get("name") or "") == "media"
-                     or str(slot.get("name") or "").startswith("media_")], 1):
-                slot["name"] = f"asset_{index}"
-                slot["localized_name"] = f"asset_{index}"
         if node.get("type") != "MarkdownNote" or node.get("title") != "使用说明":
             continue
         value = node.get("widgets_values")
@@ -943,10 +936,6 @@ def update(dst):
             text = text.rstrip() + "\n\n" + DETAIL_USAGE_APPEND
         if isinstance(text, str):
             node["widgets_values"] = [text] if isinstance(value, list) else text
-            if isinstance(node.get("widgets_values_named"), dict):
-                node["widgets_values_named"]["text"] = text
-            if isinstance(node.get("properties", {}).get("text"), str):
-                node["properties"]["text"] = text
 
     migrate_legacy_detail_inputs(data)
     repair_long_inputs(data)

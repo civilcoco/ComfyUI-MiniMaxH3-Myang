@@ -1,6 +1,7 @@
 import importlib
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,10 +18,12 @@ for path in (str(COMFY_DIR), str(CUSTOM_NODES_DIR)):
 
 package = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 director = importlib.import_module("ComfyUI-MiniMaxH3-Myang.director")
+detail = importlib.import_module("ComfyUI-MiniMaxH3-Myang.detail")
 neural = importlib.import_module("ComfyUI-MiniMaxH3-Myang.latent_upscale_3d")
 legacy = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
+native = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
+core = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
 shot_media_module = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media")
-media_catalog = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
 turbo = importlib.import_module("ComfyUI-MiniMaxH3-Myang.turbo")
 
 
@@ -32,10 +35,15 @@ def check(value, message):
 def test_director_registration_and_variable_timeline():
     check("H3Director" in package.NODE_CLASS_MAPPINGS,
           "Director is not registered")
+    check({"H3Pass1CheckpointSave", "H3Pass1CheckpointLoad",
+           "H3Pass1VideoEncode"}.issubset(package.NODE_CLASS_MAPPINGS),
+          "pass-1 recovery nodes are not registered")
     director_optional = director.H3Director.INPUT_TYPES()["optional"]
     redundant = {"script", "二采设置", "Turbo联合模型", "Turbo推荐一采步数"}
     check(redundant.isdisjoint(director_optional),
           "Director still exposes redundant compatibility inputs")
+    check({"一采断点模式", "一采成片", "一采成片音频"}.issubset(
+        director_optional), "Director does not expose pass-1 recovery controls")
     plan = director._timeline_plan({"shots": [
         {"prompt": "镜头一", "duration_seconds": 5.0},
         {"prompt": "镜头二", "duration_seconds": 6.0},
@@ -47,6 +55,67 @@ def test_director_registration_and_variable_timeline():
     expected = sum(item["frames"] for item in plan["segments"]) - 22
     check(plan["ref_frames_needed"] == expected,
           "variable timeline reference length is wrong")
+
+
+def test_director_timeline_isolated_by_task_mode():
+    transfer = {
+        "shots": [{"prompt": "动作提示", "duration_seconds": 5}],
+        "global_assets": [{"kind": "image", "label": "动作角色",
+                            "file": {"name": "transfer.png"}}],
+    }
+    fresh = {
+        "shots": [{"prompt": "纯生成提示", "duration_seconds": 5}],
+        "global_assets": [{"kind": "image", "label": "生成角色",
+                            "file": {"name": "fresh.png"}}],
+    }
+    envelope = json.dumps({"version": 4, "active_mode": legacy.TASK_FRESH,
+                           "modes": {legacy.TASK_TRANSFER: transfer,
+                                      legacy.TASK_FRESH: fresh}},
+                          ensure_ascii=False)
+    check(director._timeline_shots(envelope, legacy.TASK_TRANSFER)[0]["prompt"]
+          == "动作提示", "动作迁移读取了其他模式的提示词")
+    check(director._timeline_shots(envelope, legacy.TASK_FRESH)[0]["prompt"]
+          == "纯生成提示", "纯生成读取了其他模式的提示词")
+    check(director._timeline_globals(envelope, legacy.TASK_TRANSFER) == [],
+          "动作迁移重新暴露了已移除的独立公共素材桶")
+    check(director._timeline_globals(envelope, legacy.TASK_FRESH)[0]["file"]["name"]
+          == "fresh.png", "纯生成读取了其他模式的公共素材")
+    try:
+        director._timeline_shots(envelope, legacy.TASK_CONTINUE)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("缺失模式不应借用其他模式的分镜")
+
+
+def test_director_transition_controls_motion_context_boundaries():
+    plan = director._timeline_plan({"shots": [
+        {"prompt": "镜头一", "duration_seconds": 5.0, "transition": "切镜"},
+        {"prompt": "镜头二", "duration_seconds": 5.0, "transition": "承接"},
+        {"prompt": "镜头三", "duration_seconds": 5.0, "transition": "切镜"},
+    ]}, 22)
+    check([item["transition"] for item in plan["segments"]]
+          == ["开场", "承接", "切镜"],
+          "manual storyboard transitions were not normalized into the run plan")
+    expected = sum(item["frames"] for item in plan["segments"]) - 22
+    check(plan["ref_frames_needed"] == expected,
+          "cut boundaries still subtract a MotionContext overlap")
+    cut_tail = director._slice_plan_from_segment(
+        plan, 3, 22, has_context=False)
+    check(cut_tail["segment_count"] == 1
+          and cut_tail["segments"][0]["index"] == 3
+          and cut_tail["resume_context_required"] is False,
+          "starting from a cut did not remain an independent absolute segment")
+
+    source = (PACKAGE_DIR / "web" / "h3_director_ui.js").read_text("utf-8")
+    check("function renderShotTransition(node, shot, index)" in source
+          and 'for (const option of ["承接", "切镜"])' in source,
+          "manual storyboard cards have no per-boundary transition control")
+    check("MotionContext 无缝续接" in source
+          and "独立生成，不参考上一段末尾" in source,
+          "the transition choices do not explain their generation behaviour")
+    check('control.setAttribute("aria-pressed", String(active))' in source,
+          "the segmented transition control has no accessible selected state")
 
 
 def test_director_panel_tracks_node_selection_and_resize():
@@ -70,28 +139,140 @@ def test_director_panel_tracks_node_selection_and_resize():
           "Director form keyboard events still leak into canvas shortcuts")
     check("createPromptEditor(node, shot" in source and "directorMediaList(node, shot)" in source,
           "Director prompt editor does not render ordinal material mentions")
+    check('add.textContent = "＋ 插入对话"' in source
+          and "createDialogueToolbar(editor, sync)" in source
+          and '`[Chinese] ${selected || "请输入台词"}`' in source,
+          "Director ordinary prompt inputs have no usable dialogue-block control")
+    check('语法：<d>[Chinese] 台词</d>' in source
+          and 'block.contentEditable = "true"' in source
+          and '?.closest?.(".myh3-chip")' in source,
+          "Director dialogue syntax is hidden or rendered dialogue blocks are not editable")
+    check("event.preventDefault();" in source[source.index("function createDialogueToolbar"):
+                                               source.index("function closeDirectorMenu")],
+          "Director dialogue button destroys the contenteditable selection before insertion")
+    check("function promptSelectionText(editor)" in source
+          and 'if (dialogue) return `<d>${dialogue.textContent}</d>`;' in source
+          and 'event.clipboardData?.setData("text/plain", text)' in source
+          and "promptFragmentFromText(text, materialList())" in source,
+          "Director dialogue copy/paste does not preserve the structured block")
+    check("function selectedDialogueBlock(editor)" in source
+          and "if (wholeDialogue) wholeDialogue.remove();" in source,
+          "cutting a dialogue leaves an empty styled shell in the prompt")
+    check('event.stopPropagation();' in source[source.index('editor.addEventListener("keydown"'):
+                                                source.index('editor.addEventListener("paste"')],
+          "Director editor shortcuts still bubble to the ComfyUI canvas")
     check("label.textContent = entry?.subject" in source,
           "Director material chips still expose filenames instead of optional subject names")
     long_source = (PACKAGE_DIR / "web" / "h3_longvideo_ui.js").read_text("utf-8")
     check("text.textContent = entry?.subject" in long_source,
           "Long-video material chips still expose filenames instead of optional subject names")
     check('api.addEventListener("myh3_progress"' in source
-          and "renderDirectorProgressPanel(node)" in source,
-          "Director has no live segment progress / preview panel")
+          and "renderDirectorProgressPanel(node)" in source
+          and 'title.textContent = "生成进度"' in source
+          and "panel.append(heading, bar, text, prompt, preview);" in source
+          and "if (state.previewFile)" in source,
+          "Director progress card no longer shows the current sampling step")
+    check("position:sticky;top:0;z-index:40" in source,
+          "Director progress card no longer stays visible while scrolling")
+    check("function directorTemplateSource(node, taskMode = currentTask(node))" in source
+          and "if (taskMode === TRANSFER)" in source
+          and "globalAssets: []," in source
+          and "const source = directorTemplateSource(node, taskMode)" in source,
+          "action-transfer templates can still capture the manual storyboard bucket")
+    check("const availableTemplates = () => (node.__myangDirectorTemplates || [])" in source
+          and ".filter((item) => item.task_mode === currentTask(node))" in source,
+          "Director template choices are not isolated by task mode")
+    check("function materialQuota(entries, allowedKinds, limits = {})" in source
+          and "图片 4/9" not in source
+          and 'parts.push(`总计 ${total}/${MEDIA_TOTAL_LIMIT}`)' in source,
+          "Director material cards have no live per-kind/total quota counter")
+    check('detailControl(node, "二采连续Sigma", "连续 Sigma 二采（实验）"' in source
+          and '"二采连续Sigma", "detail"' in source
+          and "实验轨迹共" in source,
+          "Director detail card has no opt-in continuous-Sigma experiment")
+    check('api.addEventListener("executing"' in source
+          and 'prepare: {start: 0.00' in source
+          and "function markDirectorPreparing(node, activity)" in source
+          and 'if (state.status === "running") return;' in source
+          and 'stage === "preparing"' in source,
+          "Director preparation can rewind an active sample/refine run")
+    check('assembling: {start: 0.94' in source
+          and 'exporting: {start: 0.98' in source
+          and 'stage === "assembling"' in source
+          and 'stage === "assembled"' in source
+          and 'state.phase = "assembling"' in source
+          and 'state.status = "done"' not in source[
+              source.index('else if (stage === "done")'):
+              source.index('if (detail?.preview_file)')],
+          "Director still completes before segment merge/video export")
+    check('modeCaption.textContent = "生成长度模式"' in source
+          and '"整段生成（自动匹配视频长度）"' in source
+          and 'modeSelect.onchange = () => setNativeWidget' in source,
+          "action transfer still uses an ambiguous segmentation checkbox")
+    check('"关闭",' in source[source.index('function renderFirstPassMemoryPanel'):
+                                      source.index('function renderDetailPanel')],
+          "Director UI hides the legacy 一采显存策略 value")
+    transfer_start = source.index("function renderTransferPanel(node, root)")
+    transfer_end = source.index("const DETAIL_FIELDS", transfer_start)
+    transfer_source = source[transfer_start:transfer_end]
+    check(transfer_source.index('promptLabel.textContent = "全片统一提示词"')
+          < transfer_source.index("const prompt = createPromptEditor"),
+          "the full-video prompt label is detached from its editor")
     check('const NATIVE_VIDEO_WIDGET = "video-preview"' in source
-          and "function mountNativeVideoPreview(node)" in source
+          and "function mountNativeVideoPreview(node, output = null)" in source
           and 'video.style.cssText = "display:block;width:100%;height:100%' in source,
           "Director does not embed and contain ComfyUI's native video player")
+    check("function videoResultFromOutput(output)" in source
+          and "function nativeVideoElement(node)" in source
+          and "scheduleNativeVideoMount(this, output)" in source
+          and "node.videoContainer?.replaceChildren?.()" not in source,
+          "Director can still destroy or fail to recover the native video player")
+    check('"二采显存策略": "二采显存策略"' in source
+          and '"自动平衡（16GB推荐）"' in source
+          and '"显存优先（832P保底）"' in source,
+          "Director detail card lost its VRAM balance selector")
     check("images: undefined" not in source
           and "gifs: undefined" not in source
           and "videos: undefined" not in source,
           "Director still discards the native player payload")
+    check("function outputWithoutNativeMediaPreview(output)" in source
+          and 'for (const key of ["images", "gifs", "videos", "files"])' in source
+          and "filtered[key] = []" in source
+          and 'for (const envelope of ["output", "ui"])' in source
+          and "function clearNativeStillPreviewSoon(node)" in source
+          and "function clearNativeStillPreview(node)" in source
+          and "function clearNativeStillPreviewState(node)" in source
+          and "function installCanvasPreviewGuard(node)" in source
+          and 'Object.defineProperty(node, "imgs"' in source
+          and "function hideNativeVideoWidget(node)" in source
+          and "hideNativeVideoWidget(this);" in source
+          and "nodeType.prototype.onDrawBackground = function ()" in source
+          and "clearNativeStillPreviewState(this);" in source,
+          "Director still lets temporary sampling images create a bottom canvas preview")
+    check('const stableSize = [Number(this.size?.[0] || 0)' in source
+          and "this.setSize?.(stableSize);" in source,
+          "video output can still resize the Director node")
+    check('stop.textContent = "停止并释放"' in source
+          and "await api.interrupt();" in source
+          and "await requestDirectorMemoryRelease();" in source,
+          "Director progress panel has no safe stop-and-release action")
+    init_source = (PACKAGE_DIR / "__init__.py").read_text("utf-8")
+    check('queue.set_flag("unload_models", True)' in init_source
+          and 'queue.set_flag("free_memory", True)' in init_source
+          and "finish_myang_cleanup(queue)" in init_source
+          and "_clear_whisper_cache()" in init_source,
+          "interrupted Director cleanup does not release executor and auxiliary caches")
     check(source.count("root.appendChild(renderOutputVideoPanel(node))") == 3,
           "not every Director mode puts the output player inside its panel")
     check("overflow-y:auto;scrollbar-gutter:stable" in source
           and "max-height:340px;overflow-y:auto" not in source
           and "max-height:470px;overflow-y:auto" not in source,
           "Director still uses nested scrolling instead of one card-level scrollbar")
+    check("nodeHeight - (Number.isFinite(panelTop)" in source
+          and "this.__myangDirectorPanelWidget = panel" in source
+          and "getMaxHeight: () => Number.MAX_SAFE_INTEGER" in source
+          and "element.style.height = cssHeight" in source,
+          "Director card height is still capped instead of filling the resized node")
     check("function syncScriptInputHeight(node)" in source
           and "SCRIPT_INPUT_MIN_HEIGHT = 56" in source
           and "SCRIPT_INPUT_MAX_HEIGHT = 220" in source
@@ -111,13 +292,19 @@ def test_director_panel_tracks_node_selection_and_resize():
           and "syncScriptInputHeight(node);" in source,
           "Director long-script input is not resized after edits or node resizing")
     progress_css = (PACKAGE_DIR / "web" / "h3_prompt_editor.css").read_text("utf-8")
-    check(".myh3-progress-preview" in progress_css and "max-height: 170px" in progress_css,
-          "Director's replacement progress preview has no compact height cap")
+    check(".myh3-progress-preview" in progress_css
+          and "height: 170px" in progress_css
+          and "max-height: 170px" not in progress_css,
+          "Director's progress preview must use a fixed 170px box, not a max-height "
+          "cap: with only width:100% the box height comes from the image's intrinsic "
+          "ratio, so every frame swap relayouts and visibly flashes")
+    check("__myangPreviewToken" in source and "warm.onload = swap" in source,
+          "Director progress preview swaps src without warming the next frame first")
     check('root.className = "myh3-director-root"' in source
           and ".myh3-director-root > *" in progress_css
           and "flex-shrink: 0" in progress_css
-          and source.count("flex:0 0 auto;min-height:38px") >= 1,
-          "Director flex children can still collapse the closed detail card into a border line")
+          and source.count("flex:0 0 auto;min-height:38px") >= 2,
+          "Director flex children can still collapse closed setting cards into border lines")
     check("setVisible(by.steps, true)" in source,
           "Director still hides first-pass steps when Turbo is connected")
     check("function migrateLegacyInputs(node)" in source
@@ -131,9 +318,10 @@ def test_director_panel_tracks_node_selection_and_resize():
     check('button("转入导演台分镜卡"' in source
           and "function transferPlanToStoryboard(node)" in source,
           "Director cannot freeze the latest LLM plan into editable storyboard cards")
-    check("plan_snapshot: normalizePlanSnapshot(node.__myangDirectorPlan)" in source
-          and "this.__myangDirectorPlan = parsePlanSnapshot(this)" in source,
-          "the latest LLM plan is not persisted/restored with the workflow")
+    check("active.plan_snapshot = normalizePlanSnapshot(node.__myangDirectorPlan)" in source
+          and "node.__myangDirectorModeBuckets" in source
+          and "loadModeBucket(this, modeTaskValue(this))" in source,
+          "the latest LLM plan is not persisted/restored per task mode")
     plan_event = source.index('api.addEventListener("myh3_director_plan"')
     start_event = source.index('api.addEventListener("myh3_longvideo_start"')
     check("saveTimeline(node);" in source[plan_event:start_event],
@@ -146,25 +334,118 @@ def test_director_panel_tracks_node_selection_and_resize():
           "transferring a plan does not lock future runs to the manual-card path")
     check('prompt: String(segment.prompt || "")' in transfer_source,
           "transferring a plan drops repaired @图片N bindings from its prompt")
+    check("const ENHANCEMENT_FIELDS" in source
+          and "renderEnhancementPanel(node)" in source
+          and '"H3 小脸精修"' in source
+          and '"MAINodes 高速动作修复"' in source
+          and '"角色五视图分镜"' in source,
+          "Director has no compact opt-in enhancement card")
     timeline_start = source.index("function renderTimeline(node)")
     timeline_end = source.index("function refresh(node)", timeline_start)
     timeline_source = source[timeline_start:timeline_end]
     transfer_branch = timeline_source.index("if (transferring) {")
-    check(0 <= timeline_source.index("root.appendChild(renderDetailPanel(node));") < transfer_branch,
-          "second-pass card is still conditional on the source mode")
+    check(0 <= timeline_source.index("root.appendChild(renderDetailPanel(node));") < transfer_branch
+          and 0 <= timeline_source.index("root.appendChild(renderEnhancementPanel(node));") < transfer_branch,
+          "second-pass or enhancement cards are still conditional on the source mode")
     detail_start = source.index("function renderDetailPanel(node)")
-    global_assets_start = source.index("function renderGlobalAssets(node", detail_start)
-    detail_source = source[detail_start:global_assets_start]
+    enhancement_start = source.index("function renderEnhancementPanel(node)", detail_start)
+    global_assets_start = source.index("function renderGlobalAssets(node", enhancement_start)
+    detail_source = source[detail_start:enhancement_start]
+    enhancement_source = source[enhancement_start:global_assets_start]
     check('panel.dataset.myangCollapsible = "detail"' in detail_source
+          and 'panel.dataset.myangCollapsible = "enhancement"' in enhancement_source
           and 'document.createElement("summary")' not in detail_source
+          and 'document.createElement("summary")' not in enhancement_source
           and 'min-height:38px' in detail_source
-          and 'setAttribute("aria-expanded"' in detail_source,
-          "collapsed second-pass card can still be flattened by global details/summary CSS")
+          and 'min-height:38px' in enhancement_source
+          and 'setAttribute("aria-expanded"' in detail_source
+          and 'setAttribute("aria-expanded"' in enhancement_source,
+          "collapsed second-pass cards can still be flattened by global details/summary CSS")
+    check('for (const name of ENHANCEMENT_FIELDS) hideWidget(by[name])' in source,
+          "enhancement widgets are duplicated outside the Director card")
+    check('width:118px;min-width:118px' in source,
+          "enhancement switches can still be compressed by long option names")
+
+
+def test_director_asset_preview_preserves_intrinsic_aspect_and_opens_images():
+    source = (PACKAGE_DIR / "web" / "h3_director_ui.js").read_text("utf-8")
+    asset_start = source.index("function renderShotAssets(node")
+    asset_end = source.index("function modeNotice(", asset_start)
+    asset_source = source[asset_start:asset_end]
+    check("function openAssetPreview(asset, trigger = null)" in source,
+          "Director materials have no shared image/video preview dialog")
+    check('overlay.setAttribute("aria-modal", "true")' in source
+          and 'event.key === "Escape"' in source,
+          "material preview is not an accessible dismissible dialog")
+    check('previewButton.onclick = () => openAssetPreview(asset, previewButton)' in asset_source,
+          "image/video thumbnails do not open the full preview")
+    check("object-fit:contain" in asset_source
+          and "object-fit:cover" not in asset_source,
+          "material thumbnails still crop portrait media into a landscape frame")
+    check("preview.controls = false" in asset_source,
+          "video thumbnail still competes with the full-size native player")
+
+
+def test_director_widget_changes_preserve_focus_and_caret():
+    source = (PACKAGE_DIR / "web" / "h3_director_ui.js").read_text("utf-8")
+    callback_start = source.index("const syncedCallback = (...args)")
+    callback_end = source.index("return value;", callback_start)
+    callback_source = source[callback_start:callback_end]
+    check("syncDirectorWidgetChange(this, item.name)" in callback_source
+          and "refresh(this)" not in callback_source,
+          "ordinary widget callbacks still rebuild the whole Director card")
+    native_setter_start = source.index("function setNativeWidget(node, name, value)")
+    native_setter_end = source.index("function detailControl", native_setter_start)
+    check("syncDirectorWidgetChange(node, name)" in source[native_setter_start:native_setter_end]
+          and "__myangDirectorSyncs" in source[native_setter_start:native_setter_end]
+          and "refresh(node)" not in source[native_setter_start:native_setter_end],
+          "mirrored controls still destroy focus or schedule duplicate refreshes")
+    check("const DIRECTOR_SECTION_REFRESH" in source
+          and "function captureDirectorView(node)" in source
+          and "function restoreDirectorView(node, state)" in source
+          and "root.replaceChildren();" in source,
+          "Director has no scoped rendering or focus/caret preservation")
+    detail_start = source.index("function renderDetailPanel(node)")
+    detail_end = source.index("function renderAudioPanel(node)", detail_start)
+    detail_source = source[detail_start:detail_end]
+    check('"__myangDetailPanelExpanded", "block"' in detail_source
+          and "bindDirectorCollapsible(" in detail_source
+          and "renderTimeline(node);" not in detail_source,
+          "folding the detail card still rebuilds and clears live progress")
+    audio_start = source.index("function renderAudioPanel(node)")
+    audio_end = source.index("function renderEnhancementPanel(node)", audio_start)
+    audio_source = source[audio_start:audio_end]
+    check('"__myangAudioPanelExpanded", "flex"' in audio_source
+          and "bindDirectorCollapsible(" in audio_source
+          and "renderTimeline(node);" not in audio_source,
+          "folding the audio card still rebuilds and clears live progress")
+    enhancement_start = source.index("function renderEnhancementPanel(node)")
+    enhancement_end = source.index("function directorStatsText", enhancement_start)
+    enhancement_source = source[enhancement_start:enhancement_end]
+    check('"__myangEnhancementPanelExpanded", "flex"' in enhancement_source
+          and "bindDirectorCollapsible(" in enhancement_source
+          and "renderTimeline(node);" not in enhancement_source,
+          "folding the enhancement card still rebuilds and clears live progress")
+    timeline_start = source.index("function renderTimeline(node)")
+    timeline_end = source.index("function refresh(node)", timeline_start)
+    timeline_source = source[timeline_start:timeline_end]
+    check("const progressPanel = node.__myangDirectorProgressEls?.panel || null;"
+          in timeline_source
+          and "const liveProgressPanel = progressPanel || renderDirectorProgressPanel(node);"
+          in timeline_source
+          and "root.appendChild(liveProgressPanel);"
+          in timeline_source
+          and "updateDirectorProgress(node);" in timeline_source,
+          "a full Director form refresh still recreates and blanks live progress")
 
 
 def test_director_storyboard_card_import_export_ui():
     source = (PACKAGE_DIR / "web" / "h3_director_ui.js").read_text("utf-8")
     schema = (PACKAGE_DIR / "web" / "h3_storyboard_cards.js").read_text("utf-8")
+    check('from "./h3_storyboard_cards.js"' in source
+          and "createStoryboardCardDocument" in source
+          and "parseStoryboardCardDocument" in source,
+          "Director does not import the structured storyboard card module")
     check('button("导入分镜卡"' in source and 'button("导出分镜卡"' in source,
           "Director manual-card toolbar has no structured import/export actions")
     check("createStoryboardCardDocument" in source
@@ -173,8 +454,8 @@ def test_director_storyboard_card_import_export_ui():
     check("node.__myangDirectorPlan = null" in source
           and "source.value = MANUAL" in source,
           "imported cards can still be overwritten by the previous LLM plan")
-    check("storyboard_metadata: node.__myangStoryboardMetadata || null" in source
-          and "parseStoryboardMetadata(this)" in source,
+    check("active.storyboard_metadata = node.__myangStoryboardMetadata || null" in source
+          and "node.__myangStoryboardMetadata = bucket.storyboard_metadata" in source,
           "imported storyboard provenance is not persisted with the workflow")
     check('const STORYBOARD_CARD_FORMAT = "minimax-h3-myang-director-storyboard"' in schema
           and "STORYBOARD_CARD_VERSION = 1" in schema,
@@ -184,6 +465,42 @@ def test_director_storyboard_card_import_export_ui():
           "storyboard export drops structured card or material fields")
     check("imported_storyboard: true" in schema,
           "imported cards cannot be distinguished from copy/duplicate cards")
+
+
+def test_director_card_folding_and_layer_persistence_ui():
+    source = (PACKAGE_DIR / "web" / "h3_director_ui.js").read_text("utf-8")
+    bucket = source.index("function normalizeModeBucket")
+    whitelist = source[bucket:source.index("\nfunction ", bucket + 1)]
+    # normalizeModeBucket rebuilds every shot from a fixed field list, so a key
+    # missing here is dropped on reload. Layers were, which silently reverted a
+    # layered card to its flat prompt on the next workflow load.
+    check("normalizeSegmentLayers(shot?.layers)" in whitelist
+          and "normalized.layers = layers" in whitelist,
+          "card layers are dropped when the workflow reloads")
+    check("collapsed: shot?.collapsed === true" in whitelist
+          and "layers_open: shot?.layers_open === true" in whitelist,
+          "card fold state does not survive a reload")
+    check("__myangLayersOpen" not in source,
+          "a transient __-prefixed flag is still being written into the workflow")
+
+    check('button(shot.collapsed ? "▸" : "▾"' in source
+          and "shot.collapsed = !shot.collapsed" in source,
+          "storyboard cards have no per-card fold toggle")
+    check('aria-expanded", shot.collapsed ? "false" : "true"' in source,
+          "the fold toggle does not expose its state to assistive tech")
+    check('button(anyOpen ? "全部折叠" : "全部展开"' in source
+          and "for (const shot of shots) shot.collapsed = anyOpen;" in source,
+          "there is no way to fold or unfold the whole storyboard at once")
+    # A folded card must skip building its editor, not merely hide it: the cost
+    # of a long storyboard is the contenteditable bodies and material menus.
+    fold_guard = source.index("if (shot.collapsed) {")
+    editor = source.index("const prompt = createPromptEditor(node, shot, {", fold_guard)
+    check("renderCollapsedShotSummary(shot)" in source[fold_guard:editor]
+          and "return;" in source[fold_guard:editor],
+          "a folded card still builds its prompt editor")
+    check("function renderCollapsedShotSummary(shot)" in source
+          and "dialogueSeconds(entry)" in source,
+          "the folded summary does not report dialogue against the shot length")
 
 
 def test_action_transfer_plan_uses_one_prompt_and_covers_reference():
@@ -208,6 +525,43 @@ def test_action_transfer_plan_uses_one_prompt_and_covers_reference():
           "action transfer auxiliary images/audio are not global")
 
 
+def test_action_transfer_uses_reference_duration_not_stale_template_total():
+    plan = director._single_prompt_transfer_plan(
+        {"shots": [{"prompt": "14秒动作迁移"}]}, overlap=22,
+        segment_seconds=6, ref_frames=14 * 24, auto_segment=True)
+    check(plan["segment_count"] == 3,
+          "14-second action source with a 6-second ceiling did not create 3 segments")
+    timeline = json.dumps({
+        "shots": [{"prompt": "14秒动作迁移"}],
+        "template_contract": {
+            "active": True, "total_seconds": 5, "segment_seconds": 6,
+        },
+    }, ensure_ascii=False)
+    contract = director._timeline_template_contract(timeline, legacy.TASK_TRANSFER)
+    check(contract["total_seconds"] == 0 and contract["segment_seconds"] == 6,
+          "legacy action template still overrides decoded reference-video duration")
+
+
+def test_action_transfer_sampler_windows_never_exceed_the_time_ceiling():
+    plan = director._single_prompt_transfer_plan(
+        {"shots": [{"prompt": "14秒动作迁移，按7秒上限切分"}]},
+        overlap=22, segment_seconds=7, ref_frames=14 * 24,
+        auto_segment=True)
+    ceiling = core.length_for(7, 24.0)
+    check(plan["segment_count"] == 3,
+          "the real sampler overlap was not included when enforcing the ceiling")
+    check(max(item["frames"] for item in plan["segments"]) <= ceiling,
+          "an action sampler window still exceeds the requested time ceiling")
+    starts = [item["ref_start_frame"] for item in plan["segments"]]
+    expected = [0]
+    for item in plan["segments"][:-1]:
+        expected.append(expected[-1] + item["frames"] - 22)
+    check(starts == expected,
+          "rebalanced action segments no longer begin on their overlap windows")
+    check(plan["ref_frames_needed"] >= 14 * 24,
+          "balanced action segments no longer cover the complete 14-second source")
+
+
 def test_external_action_transfer_rejects_embedded_video():
     try:
         director._single_prompt_transfer_plan({"shots": [{
@@ -229,7 +583,8 @@ def test_director_action_source_loads_uploaded_video_and_soundtrack():
     frames = torch.zeros(240, 1, 1, 3)
     soundtrack = {"waveform": torch.zeros(1, 1, 320000), "sample_rate": 32000}
     original = director._load_director_action_video
-    director._load_director_action_video = lambda asset: (frames, soundtrack)
+    director._load_director_action_video = (
+        lambda asset, **_options: (frames, soundtrack))
     try:
         plan_json, loaded_frames, loaded_audio = director.H3DirectorActionSource().load(
             json.dumps(timeline), "", 5, 22)
@@ -239,10 +594,91 @@ def test_director_action_source_loads_uploaded_video_and_soundtrack():
     check(loaded_frames is frames and loaded_audio is soundtrack,
           "Director action source did not preserve the uploaded video/audio")
     check(plan["segment_count"] == 3 and plan["reference_tail_pad"] is True,
-          "uploaded action video did not create an automatic plan")
+          "uploaded action video did not create an automatic plan within the hard window ceiling")
     check(all(not any(asset["kind"] == "video" for asset in segment["assets"])
               for segment in plan["segments"]),
           "uploaded action source leaked into per-segment reference assets")
+    director._load_director_action_video = (
+        lambda asset, **_options: (frames, soundtrack))
+    try:
+        whole_json, _, _ = director.H3DirectorActionSource().load(
+            json.dumps(timeline), "", 5, 22, auto_segment="关闭")
+    finally:
+        director._load_director_action_video = original
+    check(json.loads(whole_json)["segment_count"] == 1,
+          "localized false value unexpectedly enabled automatic segmentation")
+    director._load_director_action_video = (
+        lambda asset, **_options: (frames, soundtrack))
+    try:
+        try:
+            director.H3DirectorActionSource().load(
+                json.dumps(timeline), "", 5, 22, target_frames=300)
+        except ValueError as error:
+            check("需要 300 帧" in str(error),
+                  "short action reference produced the wrong rough-cut error")
+        else:
+            raise AssertionError("rough-cut action transfer accepted a short source")
+    finally:
+        director._load_director_action_video = original
+
+
+def test_bounded_reference_decode_caps_the_canvas_before_the_stack():
+    def canvas(width, height):
+        return shot_media_module.reference_video_size(width, height, "1080P")
+
+    # The budget check reads the machine's live free memory, so while ComfyUI
+    # itself runs (20GB of models in pinned RAM), an affordable 9.8GiB decode
+    # would "fail" — the test flaked on machine state, not on code. Pin a fixed
+    # pot of memory for the whole test.
+    class _FixedMemory:
+        def __init__(self, available):
+            self._available = int(available)
+
+        def virtual_memory(self):
+            return SimpleNamespace(available=self._available)
+
+    real_psutil = sys.modules.get("psutil")
+    sys.modules["psutil"] = _FixedMemory(64 * 1024 ** 3)
+    try:
+        _run_bounded_reference_decode_checks(canvas)
+    finally:
+        if real_psutil is None:
+            sys.modules.pop("psutil", None)
+        else:
+            sys.modules["psutil"] = real_psutil
+
+
+def _run_bounded_reference_decode_checks(canvas):
+    stream = SimpleNamespace(
+        frames=846, average_rate=60, duration=None, time_base=None)
+    upright = SimpleNamespace(rotation=0, width=2160, height=3840)
+    plan = core._bounded_plan(upright, canvas, stream, 2.5, "action.mp4")
+    check(plan.canvas == (1080, 1920) and plan.turns == 0,
+          "the reference decode did not adopt the selected 1080P canvas")
+    check((plan.reformat["width"], plan.reformat["height"]) == (1080, 1920)
+          and plan.reformat["format"] == "rgb24",
+          "the decode still asks swscale for the source canvas, so a 4K clip is "
+          "materialised at 4K before anything can shrink it")
+    check(core._bounded_frame_estimate(stream, 2.5) == 338,
+          "the 24fps decimation estimate disagrees with the decode loop")
+
+    sideways = SimpleNamespace(rotation=90, width=3840, height=2160)
+    turned = core._bounded_plan(sideways, canvas, stream, 2.5, "action.mp4")
+    check(turned.canvas == (1080, 1920) and turned.turns == 1
+          and (turned.reformat["width"], turned.reformat["height"]) == (1920, 1080),
+          "a rotation-tagged clip was not scaled to the transposed canvas")
+
+    unaffordable = SimpleNamespace(
+        frames=100000, average_rate=60, duration=None, time_base=None)
+    try:
+        core._bounded_plan(upright, None, unaffordable, 2.5, "action.mp4")
+    except ValueError as error:
+        check("参考视频分辨率" in str(error),
+              "an unaffordable decode failed without naming the control that "
+              "fixes it")
+    else:
+        raise AssertionError(
+            "an unaffordable reference decode was not refused up front")
 
 
 def test_reference_clip_and_audio_cover_unaligned_tail():
@@ -399,11 +835,14 @@ def test_director_action_mode_accepts_one_uploaded_video_without_external_input(
         steps=25, denoise=1.0, scheduler="simple", noise_seed=0,
         context_length="22", ref_image_size="匹配生成分辨率",
         save_segments=False, segment_prefix="video/test",
-        save_raw_segments=False)
+        save_raw_segments=False, **{"参考视频分辨率": "1080P"})
     graph = result["expand"]
     sources = [entry for entry in graph.values()
                if entry["class_type"] == "H3DirectorActionSource"]
     check(len(sources) == 1, "Director did not create its uploaded action source")
+    check(sources[0]["inputs"].get("resolution") == "1080P",
+          "the reference-resolution cap never reaches the decoder, so it cannot "
+          "bound peak RAM")
     long_node = next(entry for entry in graph.values()
                      if entry["class_type"] == "H3LongVideo")
     check("ref_video" in long_node["inputs"] and "ref_audio" in long_node["inputs"],
@@ -440,7 +879,7 @@ def test_continuation_uses_previous_video_only_as_motion_context():
         {"prompt": "续写第二段", "duration_seconds": 5},
     ]}, 22)
     ref_video = torch.zeros(60, 1, 1, 3)
-    graph = legacy.H3LongVideo().run(
+    graph = native.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_CONTINUE, resolution="480P",
@@ -467,7 +906,7 @@ def test_action_transfer_slices_video_and_audio_on_the_same_windows():
         {"shots": [{"prompt": "统一动作"}]}, 22, 5, 240)
     ref_video = torch.zeros(240, 1, 1, 3)
     ref_audio = {"waveform": torch.zeros(1, 1, 320000), "sample_rate": 32000}
-    graph = legacy.H3LongVideo().run(
+    graph = native.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",
@@ -529,7 +968,7 @@ def test_long_video_resume_anchors_context_video_without_using_it_as_reference()
         {"shots": [{"prompt": "统一动作"}]}, 22, 5, 700, start_segment=5)
     ref_video = torch.zeros(700, 1, 1, 3)
     context_video = torch.zeros(125, 1, 1, 3)
-    graph = legacy.H3LongVideo().run(
+    graph = native.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",
@@ -581,22 +1020,23 @@ def test_director_requires_previous_cut_when_resuming():
         ref_image_size="匹配生成分辨率", save_segments=False,
         segment_prefix="video/test", save_raw_segments=False,
         ref_video=torch.zeros(700, 1, 1, 3))
+    full = director._single_prompt_transfer_plan(
+        {"shots": [{"prompt": "统一动作"}]}, 22, 5, 700)
     try:
-        node.run(**common, **{"起始段": 5})
+        director._slice_plan_from_segment(full, 5, 22, has_context=False)
     except ValueError as error:
         check("前段视频" in str(error), "wrong missing-context error: %s" % error)
     else:
-        raise AssertionError("Director resumed without the previous cut")
-
-    try:
-        node.run(**common, **{"起始段": 1, "前段视频": torch.zeros(125, 1, 1, 3)})
-    except ValueError as error:
-        check("起始段" in str(error), "wrong stale-context error: %s" % error)
-    else:
-        raise AssertionError("Director accepted a context cut while starting at 1")
+        raise AssertionError("Director resumed a seamless segment without the previous cut")
 
     graph = node.run(**common, **{
-        "起始段": 5, "前段视频": torch.zeros(125, 1, 1, 3)})["expand"]
+        "从指定段开始": True, "起始段": 5,
+        "前段视频": torch.zeros(125, 1, 1, 3)})["expand"]
+    slice_node = next(entry for entry in graph.values()
+                      if entry["class_type"] == "H3DirectorPlanSlice")
+    check(slice_node["inputs"]["start_segment"] == 5
+          and "context_video" in slice_node["inputs"],
+          "the runtime plan slicer did not receive the resume gate and context")
     long_node = next(entry for entry in graph.values()
                      if entry["class_type"] == "H3LongVideo")
     check("context_video" in long_node["inputs"],
@@ -672,15 +1112,18 @@ def test_shared_uploads_stack_after_a_connected_media_agent():
 
 
 def test_manifest_numbering_matches_the_generator_and_survives_the_cache_key():
-    bundle = media_catalog.MyangMediaCatalog(assets=(
-        media_catalog.MyangMediaAsset(
-            1, "image", torch.zeros(1, 8, 8, 3), "hero.png", "女主角正面照"),
-        media_catalog.MyangMediaAsset(
-            2, "video", torch.zeros(4, 8, 8, 3), "dance.mp4", "舞蹈动作"),
-        media_catalog.MyangMediaAsset(
-            3, "image", torch.zeros(1, 8, 8, 3), "street.png", "夜市街景"),
-    ))
-    rows = list(legacy.core.media_rows(bundle))
+    bundle = SimpleNamespace(
+        items=(
+            SimpleNamespace(input_index=1, media_type="image", value=torch.zeros(1, 8, 8, 3)),
+            SimpleNamespace(input_index=2, media_type="video", value=torch.zeros(4, 8, 8, 3)),
+            SimpleNamespace(input_index=3, media_type="image", value=torch.zeros(1, 8, 8, 3)),
+        ),
+        links=(
+            {"order": 1, "filename": "hero.png", "subject": "女主角正面照"},
+            {"order": 2, "filename": "dance.mp4", "subject": "舞蹈动作"},
+            {"order": 3, "filename": "street.png", "subject": "夜市街景"},
+        ))
+    rows = list(native.core.media_rows(bundle))
     check([(kind, ordinal) for kind, ordinal, _s, _f in rows]
           == [("image", 1), ("image", 2), ("video", 1)],
           "media_rows did not renumber per type the way H3Condition counts")
@@ -688,7 +1131,7 @@ def test_manifest_numbering_matches_the_generator_and_survives_the_cache_key():
     check("@图片2：" in manifest and "夜市街景" in manifest,
           "the manifest hid the subject the LLM needs to match assets: %s" % manifest)
     check("@视频1" in manifest and "@视频3" not in manifest,
-          "the manifest numbered the clip by catalog slot instead of by type")
+          "the manifest numbered the clip by input_index instead of by type")
     check(legacy._cache_key("剧本", 4, "svc", 0, manifest)
           != legacy._cache_key("剧本", 4, "svc", 0, ""),
           "changing the materials would reuse a split that names old assets")
@@ -724,8 +1167,21 @@ def test_director_forwards_skill_and_vision_settings_to_the_splitter():
           "the Director kept the Skill/VLM settings to itself")
 
     required = director.H3Director.INPUT_TYPES()["required"]
-    check(list(required)[-1] == "vlm_service",
-          "Skill/VLM controls no longer form the stable tail of Director widgets")
+    enhancement_tail = [
+        "脸部精修开启", "脸部检测器", "脸部精修步数", "脸部精修重绘",
+        "脸部裁剪倍率", "脸部身份图序号", "动作修复开启", "动作修复档位",
+        "动作修复步数", "动作修复注入", "多视角分镜开启",
+        "多视角角色图片序号", "多视角尺寸", "多视角步数", "多视角LoRA",
+        "多视角LoRA强度", "二采复用一采条件",
+        "音频精修开启", "音频精修步数", "音频去噪强度", "音频精修采样器",
+        "音频精修调度器", "音频接缝平滑", "音频接缝时长",
+        "从指定段开始",
+        "二采显存策略", "二采自定义显存预留", "二采自定义预览间隔",
+        "二采连续Sigma",
+    ]
+    check(list(required)[-len(enhancement_tail):] == enhancement_tail
+          and list(required).index("vlm_service") < list(required).index("脸部精修开启"),
+          "enhancement widgets were not appended after the existing saved values")
     presets = required["skill_preset"][0]
     check(presets[0] == legacy.SKILL_PRESET_AUTO and "none" in presets,
           "the Skill dropdown lost auto/none routing")
@@ -749,36 +1205,61 @@ def test_director_forwards_skill_and_vision_settings_to_the_splitter():
           "action transfer should not route through the LLM splitter")
 
 
-def test_resume_settings_are_ignored_outside_action_transfer():
-    """A control the panel hides must never be able to block a run.
-
-    `起始段` and `前段视频` only appear in the action-transfer panel, so after
-    switching task modes their values are leftover state, not intent — and the
-    user has no visible control to reset them with.
-    """
+def test_resume_checkbox_gates_manual_cards_and_agent_always_starts_from_head():
+    """The integer is inert until checked; Agent ignores even a stale check."""
     node = director.H3Director()
-    for task in (legacy.TASK_FRESH, legacy.TASK_CONTINUE):
-        graph = node.run(
-            h3=object(), model=object(), sampler=object(),
-            source_mode=director.DIRECTOR_TIMELINE,
-            timeline_json='{"shots":[{"prompt":"镜头一","duration_seconds":5}]}',
-            script_fallback="", total_seconds=20, segment_seconds=5,
-            llm_enabled=False, llm_service="未配置 LLM 服务", task_mode=task,
-            resolution="480P", aspect_ratio="16:9", width=864, height=480,
-            steps=25, denoise=1.0, scheduler="simple", noise_seed=0,
-            context_length="22", ref_image_size="匹配生成分辨率",
-            save_segments=False, segment_prefix="video/test",
-            save_raw_segments=False,
-            ref_video=torch.zeros(300, 1, 1, 3) if task == legacy.TASK_CONTINUE else None,
-            **{"起始段": 6, "前段视频": torch.zeros(125, 1, 1, 3)})["expand"]
-        long_node = next(entry for entry in graph.values()
-                         if entry["class_type"] == "H3LongVideo")
-        check("context_video" not in long_node["inputs"],
-              "%s leaked the stale resume context into the render loop" % task)
+    common = dict(
+        h3=object(), model=object(), sampler=object(),
+        timeline_json=json.dumps({"shots": [
+            {"prompt": "镜头一", "duration_seconds": 5},
+            {"prompt": "镜头二", "duration_seconds": 5, "transition": "承接"},
+            {"prompt": "镜头三", "duration_seconds": 5, "transition": "切镜"},
+        ]}), script_fallback="长剧本", total_seconds=20, segment_seconds=5,
+        llm_enabled=False, llm_service="未配置 LLM 服务",
+        task_mode=legacy.TASK_FRESH, resolution="480P", aspect_ratio="16:9",
+        width=864, height=480, steps=25, denoise=1.0, scheduler="simple",
+        noise_seed=0, context_length="22", ref_image_size="匹配生成分辨率",
+        save_segments=False, segment_prefix="video/test", save_raw_segments=False)
+
+    unchecked = node.run(
+        **common, source_mode=director.DIRECTOR_TIMELINE,
+        **{"从指定段开始": False, "起始段": 2,
+           "前段视频": torch.zeros(125, 1, 1, 3)})["expand"]
+    check(not any(entry["class_type"] == "H3DirectorPlanSlice"
+                  for entry in unchecked.values()),
+          "unchecked manual start segment still cropped the plan")
+    unchecked_long = next(entry for entry in unchecked.values()
+                          if entry["class_type"] == "H3LongVideo")
+    check("context_video" not in unchecked_long["inputs"],
+          "unchecked manual resume leaked stale context")
+
+    manual = node.run(
+        **common, source_mode=director.DIRECTOR_TIMELINE,
+        **{"从指定段开始": True, "起始段": 2,
+           "前段视频": torch.zeros(125, 1, 1, 3)})["expand"]
+    check(any(entry["class_type"] == "H3DirectorPlanSlice"
+              for entry in manual.values()),
+          "checked manual storyboard did not get a runtime plan slice")
+
+    agent = node.run(
+        **common, source_mode=director.DIRECTOR_SCRIPT,
+        **{"从指定段开始": True, "起始段": 2,
+           "前段视频": torch.zeros(125, 1, 1, 3)})["expand"]
+    check(not any(entry["class_type"] == "H3DirectorPlanSlice"
+                  for entry in agent.values()),
+          "Agent mode accepted a stale resume selection")
+    agent_long = next(entry for entry in agent.values()
+                      if entry["class_type"] == "H3LongVideo")
+    check("context_video" not in agent_long["inputs"],
+          "Agent mode received a resume context")
 
     source = (PACKAGE_DIR / "web" / "h3_director_ui.js").read_text("utf-8")
-    check('by["起始段"].value = 1' in source,
-          "the frontend never resets the stale start segment when leaving transfer")
+    check('if (!transferring && manual) root.appendChild(renderResumePanel(node));'
+          in source and 'hideWidget(by["从指定段开始"]);' in source,
+          "the resume checkbox is not confined to transfer and manual cards")
+    check('toggle.type = "checkbox"' in source
+          and 'startInput.disabled = !enabled' in source,
+          "the start selector is not gated by an actual checkbox")
 
 
 def test_director_accepts_turbo_on_its_single_model_input():
@@ -956,6 +1437,8 @@ def test_director_builds_integrated_optional_detail_pass():
         segment_prefix="video/test", save_raw_segments=True,
         **{"二采开启": True, "二采模型": detail_model,
            "二采模式": "放大 + 二采（推荐）", "二采分辨率": "832P",
+           "一采断点模式": legacy.PASS1_CHECKPOINT_SAVE,
+           "二采显存策略": detail.DETAIL_MEMORY_LOW,
            "二采放大方式": "neural_3d (神经3D Latent放大·推荐)",
            "二采Latent模型": "minimax_h3_latent_upscaler_3d_fp16.safetensors"})
     graph = result["expand"]
@@ -964,12 +1447,37 @@ def test_director_builds_integrated_optional_detail_pass():
     check(len(detail_nodes) == 1, "Director did not build its integrated detail settings")
     check(detail_nodes[0]["inputs"]["二采模型"] is detail_model,
           "Director did not route the detail base model")
+    check(detail_nodes[0]["inputs"]["memory_profile"] == detail.DETAIL_MEMORY_LOW,
+          "Director did not forward the detail VRAM profile")
     long_node = next(entry for entry in graph.values()
                      if entry["class_type"] == "H3LongVideo")
     check("二采设置" in long_node["inputs"],
           "integrated detail settings did not reach H3LongVideo")
     check(long_node["inputs"]["save_raw_segments"] is True,
           "Director discarded raw-segment saving while detail pass is enabled")
+    check(long_node["inputs"]["一采断点模式"] == legacy.PASS1_CHECKPOINT_SAVE,
+          "Director did not forward its pass-1 checkpoint mode")
+
+    continuous = node.run(
+        h3=object(), model=object(), sampler=object(),
+        source_mode=director.DIRECTOR_TIMELINE,
+        timeline_json='{"shots":[{"prompt":"镜头一","duration_seconds":5}]}',
+        script_fallback="", total_seconds=5, segment_seconds=5,
+        llm_enabled=False, llm_service="none",
+        task_mode=legacy.TASK_FRESH, resolution="480P", aspect_ratio="16:9",
+        width=864, height=480, steps=8, denoise=1.0,
+        scheduler="simple", noise_seed=0, context_length="22",
+        ref_image_size="匹配生成分辨率", save_segments=False,
+        segment_prefix="video/test", save_raw_segments=False,
+        **{"二采开启": True, "二采连续Sigma": True,
+           "二采模式": "放大 + 二采（推荐）", "二采分辨率": "832P",
+           "二采放大方式": "neural_3d (神经3D Latent放大·推荐)"})
+    continuous_detail = next(
+        entry for entry in continuous["expand"].values()
+        if entry["class_type"] == "H3DetailSettings")
+    check(continuous_detail["inputs"]["continuous_sigma"] is True
+          and "二采模型" not in continuous_detail["inputs"],
+          "Director continuous-Sigma profile still requires or routes a separate model")
 
 
 def test_director_disables_raw_segment_copy_when_detail_is_off():
@@ -991,12 +1499,166 @@ def test_director_disables_raw_segment_copy_when_detail_is_off():
           "raw pre-detail segments remained enabled while detail pass was off")
 
 
+def _optional_pack(name):
+    """Import an optional sibling custom-node pack, or skip the caller."""
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name == name:
+            raise SkipTest("%s is not installed in custom_nodes" % name) from error
+        raise
+
+
+class SkipTest(Exception):
+    """Raised when an opt-in dependency is absent; the runner reports SKIP."""
+
+
+def test_director_builds_installed_opt_in_enhancements():
+    import nodes as comfy_nodes
+
+    mainodes = _optional_pack("ComfyUI-MAINodes")
+    face_refine = _optional_pack("ComfyUI-H3-FaceRefine")
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(mainodes.NODE_CLASS_MAPPINGS)
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(face_refine.NODE_CLASS_MAPPINGS)
+    check(all(name in comfy_nodes.NODE_CLASS_MAPPINGS for name in (
+        "H3ContactSheet", "H3JerkOracle", "H3FaceTrackCrop")),
+        "installed enhancement packs did not register their public nodes")
+    lora = COMFY_DIR / "models" / "loras" / \
+        "minimax_h3_five_view_1024cont_s600.safetensors"
+    check(lora.is_file() and lora.stat().st_size > 60_000_000,
+          "turnaround LoRA is missing or truncated")
+
+    result = director.H3Director().run(
+        h3=SimpleNamespace(clip=object(), video_vae=object()),
+        model=object(), sampler=object(),
+        source_mode=director.DIRECTOR_TIMELINE,
+        timeline_json=json.dumps({"shots": [
+            {"prompt": "人物转身", "duration_seconds": 5},
+        ]}), script_fallback="", total_seconds=5, segment_seconds=5,
+        llm_enabled=False, llm_service="none", task_mode=legacy.TASK_FRESH,
+        resolution="480P", aspect_ratio="16:9", width=864, height=480,
+        steps=25, denoise=1.0, scheduler="simple", noise_seed=0,
+        context_length="22", ref_image_size="匹配生成分辨率",
+        save_segments=False, segment_prefix="video/test",
+        save_raw_segments=False, media=object(),
+        **{"脸部精修开启": True, "动作修复开启": True,
+           "多视角分镜开启": True, "多视角角色图片序号": 1,
+           "多视角尺寸": "512", "多视角步数": 28,
+           "多视角LoRA": lora.name, "多视角LoRA强度": 0.75})
+    graph = result["expand"]
+    kinds = [entry["class_type"] for entry in graph.values()]
+    for required in ("H3ContactSheet", "H3ContactSheetDecode",
+                     "H3DirectorTurnaroundMedia",
+                     "H3DirectorEnhancementSettings", "H3LongVideo"):
+        check(required in kinds, "Director omitted %s" % required)
+    long_node = next(entry for entry in graph.values()
+                     if entry["class_type"] == "H3LongVideo")
+    check("增强设置" in long_node["inputs"] and "media" in long_node["inputs"],
+          "enhancement settings or generated sheet did not reach H3LongVideo")
+
+
+def test_long_video_builds_motion_then_face_pipeline():
+    import nodes as comfy_nodes
+
+    mainodes = _optional_pack("ComfyUI-MAINodes")
+    face_refine = _optional_pack("ComfyUI-H3-FaceRefine")
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(mainodes.NODE_CLASS_MAPPINGS)
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(face_refine.NODE_CLASS_MAPPINGS)
+    plan = director._timeline_plan({"shots": [
+        {"prompt": "人物快速转头", "duration_seconds": 5},
+    ]}, 22)
+    graph = native.H3LongVideo().run(
+        h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
+        model=object(), sampler=object(), plan_json=json.dumps(plan),
+        task_mode=legacy.TASK_FRESH, resolution="480P",
+        aspect_ratio="16:9", width=864, height=480,
+        steps=25, denoise=1.0, scheduler="simple", noise_seed=0,
+        context_length="22", prompt_mode=legacy.MODE_DIRECT,
+        media_prefix="", ref_image_size="匹配生成分辨率",
+        save_segments=False, segment_prefix="video/test",
+        save_raw_segments=False, **{"增强设置": {
+            "model": object(),
+            "motion": {"enabled": True, "preset": "balanced (default)",
+                       "steps": 6, "inject": 0.70},
+            "face": {"enabled": True, "detector": "bbox\\face_yolov8m.pt",
+                     "steps": 4, "denoise": 0.45, "crop_factor": 2.5,
+                     "identity_ordinal": 0},
+        }})["expand"]
+    kinds = [entry["class_type"] for entry in graph.values()]
+    for required in (
+            "H3JerkOracle", "H3TimeSmear", "H3InjectSchedule",
+            "H3ExactRecover", "H3AudioRecover", "H3FramesToSeconds",
+            "H3FaceTrackCrop", "H3InjectVideoLatent",
+            "H3PerFrameDenoise", "H3FaceStitch"):
+        check(required in kinds, "enhancement pipeline omitted %s" % required)
+    stages = [entry["inputs"].get("stage") for entry in graph.values()
+              if entry["class_type"] == "H3ProgressSignal"]
+    check(stages.index("motion_refined") < stages.index("face_start"),
+          "face refinement no longer runs after motion repair")
+
+
+def test_face_detector_rejects_a_truncated_pytorch_archive():
+    _optional_pack("ComfyUI-H3-FaceRefine")
+    face_nodes = importlib.import_module("ComfyUI-H3-FaceRefine.nodes")
+    with tempfile.TemporaryDirectory(prefix="h3_face_detector_") as directory:
+        broken = Path(directory) / "face_yolov8m.pt"
+        broken.write_bytes(b"PK\x03\x04" + b"truncated" * 32)
+        try:
+            face_nodes._validate_detector_archive(str(broken), broken.name)
+        except ValueError as error:
+            check("损坏或下载不完整" in str(error),
+                  "truncated detector error is not actionable")
+        else:
+            raise AssertionError("truncated PyTorch detector passed preflight")
+
+
+def test_long_video_stops_on_face_detector_preflight_before_graph_sampling():
+    import nodes as comfy_nodes
+
+    face_refine = _optional_pack("ComfyUI-H3-FaceRefine")
+    comfy_nodes.NODE_CLASS_MAPPINGS.update(face_refine.NODE_CLASS_MAPPINGS)
+    original = comfy_nodes.NODE_CLASS_MAPPINGS["H3FaceTrackCrop"]
+
+    class BrokenDetector:
+        @classmethod
+        def validate_detector(cls, detector):
+            raise ValueError("检测模型损坏")
+
+    comfy_nodes.NODE_CLASS_MAPPINGS["H3FaceTrackCrop"] = BrokenDetector
+    plan = director._timeline_plan({"shots": [
+        {"prompt": "人物特写", "duration_seconds": 5},
+    ]}, 22)
+    try:
+        try:
+            native.H3LongVideo().run(
+                h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
+                model=object(), sampler=object(), plan_json=json.dumps(plan),
+                task_mode=legacy.TASK_FRESH, resolution="480P",
+                aspect_ratio="16:9", width=864, height=480,
+                steps=25, denoise=1.0, scheduler="simple", noise_seed=0,
+                context_length="22", prompt_mode=legacy.MODE_DIRECT,
+                media_prefix="", ref_image_size="匹配生成分辨率",
+                save_segments=False, segment_prefix="video/test",
+                save_raw_segments=False, **{"增强设置": {
+                    "model": object(),
+                    "face": {"enabled": True,
+                             "detector": "bbox\\face_yolov8m.pt"},
+                }})
+        except ValueError as error:
+            check("视频采样前停止" in str(error) and "检测模型损坏" in str(error),
+                  "detector preflight failure lost its early-stop diagnosis")
+        else:
+            raise AssertionError("long-video graph accepted a broken face detector")
+    finally:
+        comfy_nodes.NODE_CLASS_MAPPINGS["H3FaceTrackCrop"] = original
+
+
 def test_long_video_uses_variable_shot_windows():
     plan = director._timeline_plan({"shots": [
         {"prompt": "镜头一", "duration_seconds": 5},
         {"prompt": "镜头二", "duration_seconds": 6},
     ]}, 22)
-    graph = legacy.H3LongVideo().run(
+    graph = native.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",
@@ -1031,7 +1693,7 @@ def test_long_video_routes_each_shot_action_material_lazily():
             }],
         })
     plan = director._timeline_plan({"version": 2, "shots": shots}, 22)
-    graph = legacy.H3LongVideo().run(
+    graph = native.H3LongVideo().run(
         h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
         model=object(), sampler=object(), plan_json=json.dumps(plan),
         task_mode=legacy.TASK_TRANSFER, resolution="480P",
@@ -1048,6 +1710,418 @@ def test_long_video_routes_each_shot_action_material_lazily():
     check([entry["inputs"]["required_frames"] for entry in shot_media]
           == [segment["frames"] for segment in plan["segments"]],
           "action material did not receive its shot-specific frame window")
+
+
+def _second_pass_graph(**detail_overrides):
+    """Build a one-shot long-video graph with the detail pass switched on."""
+    pass1_mode = detail_overrides.pop(
+        "pass1_checkpoint_mode", legacy.PASS1_CHECKPOINT_OFF)
+    pass1_video = detail_overrides.pop("pass1_video", None)
+    pass1_audio = detail_overrides.pop("pass1_audio", None)
+    plan = director._timeline_plan(
+        {"shots": [{"prompt": "镜头一", "duration_seconds": 5}]}, 22)
+    settings = {
+        "enabled": True,
+        "mode": "放大 + 二采（推荐）",
+        "resolution": "832P",
+        "width": 1664, "height": 928,
+        "steps": 4, "denoise": 0.2,
+        "scheduler": "beta", "sampler_name": "res_multistep",
+        "upscale_method": "neural_3d (神经3D Latent放大·推荐)",
+        "chunk_frames": 4,
+        "latent_upscale_model": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+        "latent_precision": neural.PRECISIONS[0],
+        "latent_chunk_steps": 0,
+        "passes": 1,
+        "seed_mode": "每轮沿用同一种子",
+        "reuse_condition": True,
+        "model": object(),
+    }
+    settings.update(detail_overrides)
+    extra = {
+        "二采设置": settings,
+        "一采断点模式": pass1_mode,
+    }
+    if pass1_video is not None:
+        extra["一采成片"] = pass1_video
+    if pass1_audio is not None:
+        extra["一采成片音频"] = pass1_audio
+    return native.H3LongVideo().run(
+        h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
+        model=object(), sampler=object(), plan_json=json.dumps(plan),
+        task_mode=legacy.TASK_FRESH, resolution="480P",
+        aspect_ratio="16:9", width=864, height=480,
+        steps=8, denoise=1.0, scheduler="simple", noise_seed=0,
+        context_length="22", prompt_mode=legacy.MODE_DIRECT,
+        media_prefix="", llm_service="none",
+        ref_image_size="匹配生成分辨率", save_segments=False,
+        segment_prefix="video/test", save_raw_segments=False,
+        **extra)["expand"]
+
+
+def test_pass1_checkpoint_modes_save_or_skip_first_sampler():
+    saved = _second_pass_graph(
+        pass1_checkpoint_mode=legacy.PASS1_CHECKPOINT_SAVE)
+    saved_kinds = [entry["class_type"] for entry in saved.values()]
+    check(saved_kinds.count("H3Pass1CheckpointSave") == 1,
+          "save mode did not persist the completed pass-1 latent")
+    saved_samplers = [entry for entry in saved.values()
+                      if entry["class_type"] == "H3SamplerAdvanced"]
+    check({entry["inputs"].get("pass_label") for entry in saved_samplers}
+          == {"sample1", "sample2"},
+          "save mode changed the normal two-pass sampler chain")
+
+    reused = _second_pass_graph(
+        pass1_checkpoint_mode=legacy.PASS1_CHECKPOINT_REUSE)
+    reused_kinds = [entry["class_type"] for entry in reused.values()]
+    check(reused_kinds.count("H3Pass1CheckpointLoad") == 1,
+          "reuse mode did not load the saved pass-1 latent")
+    reused_samplers = [entry for entry in reused.values()
+                       if entry["class_type"] == "H3SamplerAdvanced"]
+    check([entry["inputs"].get("pass_label") for entry in reused_samplers]
+          == ["sample2"],
+          "reuse mode still expanded a first-pass sampler")
+
+    original_isfile = native.os.path.isfile
+    try:
+        native.os.path.isfile = lambda _path: True
+        resumed_existing = _second_pass_graph(
+            pass1_checkpoint_mode=legacy.PASS1_CHECKPOINT_RESUME)
+        native.os.path.isfile = lambda _path: False
+        resumed_missing = _second_pass_graph(
+            pass1_checkpoint_mode=legacy.PASS1_CHECKPOINT_RESUME)
+    finally:
+        native.os.path.isfile = original_isfile
+    existing_kinds = [entry["class_type"]
+                      for entry in resumed_existing.values()]
+    missing_kinds = [entry["class_type"]
+                     for entry in resumed_missing.values()]
+    check("H3Pass1CheckpointLoad" in existing_kinds
+          and not any(entry["inputs"].get("pass_label") == "sample1"
+                      for entry in resumed_existing.values()
+                      if entry["class_type"] == "H3SamplerAdvanced"),
+          "resume mode did not skip an already completed first-pass segment")
+    check("H3Pass1CheckpointSave" in missing_kinds
+          and any(entry["inputs"].get("pass_label") == "sample1"
+                  for entry in resumed_missing.values()
+                  if entry["class_type"] == "H3SamplerAdvanced"),
+          "resume mode did not generate and checkpoint a missing segment")
+
+
+def test_single_pass1_video_can_enter_detail_without_sampling_again():
+    graph = _second_pass_graph(
+        pass1_checkpoint_mode=legacy.PASS1_VIDEO_REUSE,
+        pass1_video=object(), pass1_audio=object())
+    kinds = [entry["class_type"] for entry in graph.values()]
+    check(kinds.count("H3Pass1VideoEncode") == 1,
+          "finished pass-1 video was not re-encoded for detail")
+    samplers = [entry for entry in graph.values()
+                if entry["class_type"] == "H3SamplerAdvanced"]
+    check([entry["inputs"].get("pass_label") for entry in samplers]
+          == ["sample2"],
+          "finished pass-1 video still triggered pass-1 sampling")
+    sampled_signal = next(
+        entry for entry in graph.values()
+        if entry["class_type"] == "H3ProgressSignal"
+        and entry["inputs"].get("stage") == "sampled")
+    check(sampled_signal["inputs"]["save_preview"] is True,
+          "direct pass-1 video reuse lost its compact progress-card preview")
+    collector = next(entry for entry in graph.values()
+                     if entry["class_type"] == "H3SegmentCollector")
+    check(bool(collector["inputs"].get("run_id"))
+          and "owner_id" in collector["inputs"]
+          and collector["inputs"].get("total_segments") == 1,
+          "final collector cannot publish merge progress to the Director")
+
+
+def test_pass1_checkpoint_round_trip_preserves_av_streams_and_contract():
+    import comfy.nested_tensor
+    import folder_paths
+
+    video = torch.randn(1, 24, 3, 4, 5)
+    audio = torch.randn(1, 8, 6)
+    samples = {"samples": comfy.nested_tensor.NestedTensor((video, audio))}
+    original_output = folder_paths.get_output_directory
+    with tempfile.TemporaryDirectory(
+            prefix="h3_pass1_checkpoint_", dir=str(TEST_DIR)) as directory:
+        folder_paths.get_output_directory = lambda: directory
+        try:
+            native.H3Pass1CheckpointSave().save(
+                samples, "video/test", 3, 125)
+            loaded = native.H3Pass1CheckpointLoad().load(
+                "video/test", 3, 125)[0]
+            streams = list(loaded["samples"].unbind())
+            check(torch.equal(streams[0], video) and torch.equal(streams[1], audio),
+                  "checkpoint round trip changed video/audio latent values")
+            try:
+                native.H3Pass1CheckpointLoad().load("video/test", 3, 126)
+            except ValueError as error:
+                check("帧数" in str(error), "frame mismatch returned an unclear error")
+            else:
+                raise AssertionError("checkpoint accepted a different storyboard duration")
+        finally:
+            folder_paths.get_output_directory = original_output
+
+
+def test_second_pass_reuses_the_first_pass_conditioning():
+    graph = _second_pass_graph()
+    conditions = [entry for entry in graph.values()
+                  if entry["class_type"] == "H3Condition"]
+    check(len(conditions) == 1,
+          "the detail pass still rebuilds conditioning at its own resolution")
+    # H3 conditioning carries prompt tokens and minimax_refs only; the target
+    # canvas comes from the latent.  Rebuilding it at the second-pass canvas
+    # also re-fits every reference image to the larger area, which changes the
+    # ref token layout the low-denoise pass is asked to converge to.
+    check(conditions[0]["inputs"]["resolution"] == "480P",
+          "the surviving conditioning is not the first pass's")
+
+    rebuilt = _second_pass_graph(reuse_condition=False)
+    resolutions = sorted(entry["inputs"]["resolution"]
+                         for entry in rebuilt.values()
+                         if entry["class_type"] == "H3Condition")
+    check(resolutions == ["480P", "832P"],
+          "opting out of reuse no longer rebuilds the second-pass conditioning")
+
+
+def test_pixel_detail_path_receives_vram_headroom_and_preview_cadence():
+    graph = _second_pass_graph(
+        upscale_method="pixel (像素放大·自用版工作流方式)",
+        memory_profile=detail.DETAIL_MEMORY_LOW,
+        reserve_vram_gb=2.0,
+        preview_interval=0)
+    upscale = next(entry for entry in graph.values()
+                   if entry["class_type"] == "H3LatentUpscale")
+    check(upscale["inputs"]["reserve_vram_gb"] == 4.5
+          and "vae" in upscale["inputs"],
+          "pixel VAE projection did not receive its VRAM safety margin")
+    second_sampler = next(
+        entry for entry in graph.values()
+        if entry["class_type"] == "H3SamplerAdvanced"
+        and entry["inputs"].get("pass_label") == "sample2")
+    check(second_sampler["inputs"]["reserve_vram_gb"] == 4.5
+          and second_sampler["inputs"]["preview_interval"] == 0,
+          "second-pass sampler ignored the selected VRAM profile")
+    barriers = [entry for entry in graph.values()
+                if entry["class_type"] == "H3RefineMemoryBarrier"]
+    check(len(barriers) == 1
+          and "conditioning" in barriers[0]["inputs"]
+          and "latent" in barriers[0]["inputs"],
+          "second pass does not clear VAE/upscaler residency after both inputs are ready")
+    nodes_source = (PACKAGE_DIR / "nodes.py").read_text("utf-8")
+    release_start = nodes_source.index("def _release_comfy_models(")
+    release_end = nodes_source.index("class H3ConditionMemoryBarrier", release_start)
+    release_source = nodes_source[release_start:release_end]
+    check("comfy.model_prefetch.cleanup_prefetch_queues()" in release_source
+          and "model_management.reset_cast_buffers()" in release_source,
+          "second-pass barrier leaves AIMDO prefetch/cast allocations pinned")
+    refine_start = next(entry for entry in graph.values()
+                        if entry["class_type"] == "H3ProgressSignal"
+                        and entry["inputs"].get("stage") == "refine_start")
+    check(refine_start["inputs"]["save_preview"] is False,
+          "second-pass preparation does not retain a visible progress frame")
+
+
+def test_first_pass_memory_profiles_control_cleanup_and_clear_preview_decode():
+    plan = director._timeline_plan(
+        {"shots": [{"prompt": "镜头一", "duration_seconds": 5}]}, 22)
+
+    def build(profile, task_mode=legacy.TASK_FRESH):
+        return native.H3LongVideo().run(
+            h3=SimpleNamespace(video_vae=object(), audio_vae=object()),
+            model=object(), sampler=object(), plan_json=json.dumps(plan),
+            task_mode=task_mode, resolution="640P",
+            aspect_ratio="16:9", width=1152, height=640,
+            steps=8, denoise=1.0, scheduler="simple", noise_seed=0,
+            context_length="22", prompt_mode=legacy.MODE_DIRECT,
+            media_prefix="", ref_image_size="匹配生成分辨率",
+            save_segments=False, segment_prefix="video/test",
+            save_raw_segments=False,
+            ref_video=(torch.zeros(130, 1, 1, 3)
+                       if task_mode == legacy.TASK_TRANSFER else None),
+            **{"一采显存策略": profile})["expand"]
+
+    balanced = build(legacy.FIRST_MEMORY_AUTO)
+    kinds = [entry["class_type"] for entry in balanced.values()]
+    check("H3PrepareSignal" in kinds,
+          "the real execution graph has no pre-conditioning progress signal")
+    check("H3PreConditionMemoryBarrier" in kinds,
+          "16GB auto profile leaves the DiT resident during VAE conditioning")
+    check("H3ConditionMemoryBarrier" in kinds,
+          "16GB auto profile omitted the post-conditioning cleanup barrier")
+    check("H3OutputMemoryRelease" in kinds,
+          "16GB auto profile omitted the final model release")
+    first_sampler = next(
+        entry for entry in balanced.values()
+        if entry["class_type"] == "H3SamplerAdvanced"
+        and entry["inputs"].get("pass_label") == "sample1")
+    check(first_sampler["inputs"]["preview_interval"] == 1
+          and first_sampler["inputs"]["reserve_vram_gb"] == 1.25
+          and first_sampler["inputs"]["preview_mode"] == "latent_rgb",
+          "16GB auto profile does not provide zero-VRAM step previews")
+
+    compatible = build(legacy.FIRST_MEMORY_STANDARD)
+    compatible_kinds = [entry["class_type"] for entry in compatible.values()]
+    check("H3PreConditionMemoryBarrier" not in compatible_kinds
+          and "H3ConditionMemoryBarrier" not in compatible_kinds
+          and "H3OutputMemoryRelease" not in compatible_kinds,
+          "compatibility profile unexpectedly changed model residency")
+    compatible_sampler = next(
+        entry for entry in compatible.values()
+        if entry["class_type"] == "H3SamplerAdvanced"
+        and entry["inputs"].get("pass_label") == "sample1")
+    check(compatible_sampler["inputs"]["preview_interval"] == 1
+          and compatible_sampler["inputs"]["preview_mode"] == "vae",
+          "compatibility profile no longer preserves per-step clear previews")
+
+    low = build(legacy.FIRST_MEMORY_LOW)
+    low_sampler = next(
+        entry for entry in low.values()
+        if entry["class_type"] == "H3SamplerAdvanced"
+        and entry["inputs"].get("pass_label") == "sample1")
+    check(low_sampler["inputs"]["preview_interval"] == 1
+          and low_sampler["inputs"]["preview_mode"] == "latent_rgb"
+          and low_sampler["inputs"]["reserve_vram_gb"] == 1.5,
+          "low-memory profile does not use per-step zero-VRAM previews")
+
+    for profile in (legacy.FIRST_MEMORY_AUTO,
+                    legacy.FIRST_MEMORY_STANDARD,
+                    legacy.FIRST_MEMORY_LOW):
+        transfer = build(profile, legacy.TASK_TRANSFER)
+        transfer_sampler = next(
+            entry for entry in transfer.values()
+            if entry["class_type"] == "H3SamplerAdvanced"
+            and entry["inputs"].get("pass_label") == "sample1")
+        expected_interval = 1 if profile == legacy.FIRST_MEMORY_STANDARD else 0
+        expected_mode = "vae" if profile == legacy.FIRST_MEMORY_STANDARD else "latent_rgb"
+        check(transfer_sampler["inputs"]["preview_interval"] == expected_interval
+              and transfer_sampler["inputs"]["preview_mode"] == expected_mode,
+              "action-transfer first-pass strategy is not selectable")
+
+
+def test_precondition_memory_barrier_evicts_dit_before_vae():
+    calls = []
+    original = native._release_comfy_models
+    native._release_comfy_models = lambda stage, keep_model=None, **kwargs: calls.append(
+        (stage, keep_model, kwargs))
+    bundle = object()
+    model = object()
+    try:
+        result, = native.H3PreConditionMemoryBarrier().release(
+            bundle, stage="model -> vae", loaded_model=model)
+    finally:
+        native._release_comfy_models = original
+    check(result is bundle and calls == [(
+              "model -> vae", model,
+              {"preserve_dynamic_host_cache": True})],
+          "pre-condition barrier did not evict GPU pages while preserving the H3 RAM cache")
+
+
+def test_precondition_release_keeps_aimdo_ram_but_drops_gpu_pages():
+    import comfy.model_management as model_management
+    import comfy.model_prefetch as model_prefetch
+
+    class DynamicPatcher:
+        offload_device = "cpu"
+
+        def __init__(self):
+            self.loaded = 3 * 1024 ** 3
+            self.partial_calls = []
+
+        def is_dynamic(self):
+            return True
+
+        def loaded_size(self):
+            return self.loaded
+
+        def partially_unload(self, device, amount):
+            self.partial_calls.append((device, amount))
+            freed, self.loaded = self.loaded, 0
+            return freed
+
+    patcher = DynamicPatcher()
+    loaded = SimpleNamespace(model=patcher, currently_used=True)
+    calls = []
+    names = (
+        "current_loaded_models", "reset_cast_buffers", "get_torch_device",
+        "get_free_memory", "get_all_torch_devices", "free_memory",
+        "soft_empty_cache", "unload_all_models")
+    originals = {name: getattr(model_management, name) for name in names}
+    original_cleanup = model_prefetch.cleanup_prefetch_queues
+    try:
+        model_management.current_loaded_models = [loaded]
+        model_management.reset_cast_buffers = lambda: calls.append("cast")
+        model_management.get_torch_device = lambda: "cuda:0"
+        model_management.get_free_memory = lambda _device: 1024 ** 3
+        model_management.get_all_torch_devices = lambda: ["cuda:0"]
+        model_management.free_memory = lambda amount, device, keep_loaded=[]: calls.append(
+            ("free", amount, device, list(keep_loaded)))
+        model_management.soft_empty_cache = lambda: calls.append("cache")
+        model_management.unload_all_models = lambda: calls.append("full-unload")
+        model_prefetch.cleanup_prefetch_queues = lambda: calls.append("prefetch")
+        native._release_comfy_models(
+            "model -> vae", keep_model=patcher,
+            preserve_dynamic_host_cache=True)
+    finally:
+        for name, value in originals.items():
+            setattr(model_management, name, value)
+        model_prefetch.cleanup_prefetch_queues = original_cleanup
+    check(patcher.loaded == 0 and patcher.partial_calls == [("cpu", 1e32)],
+          "AIMDO GPU pages were not evicted by the pre-condition release")
+    check("full-unload" not in calls and loaded.currently_used is False,
+          "pre-condition release destroyed the dynamic model RAM cache")
+    free_call = next(item for item in calls if isinstance(item, tuple))
+    check(free_call[3] == [loaded],
+          "regular ComfyUI cleanup was allowed to detach the preserved dynamic patcher")
+
+
+def test_upscale_only_pixel_path_skips_every_vae_round_trip():
+    graph = _second_pass_graph(
+        mode="仅放大（不二采·最快）",
+        upscale_method="nvidia_rtx_vsr (NVIDIA RTX 视频超分·实验)",
+        model=None)
+    kinds = [entry["class_type"] for entry in graph.values()]
+    check("H3PixelUpscale" in kinds,
+          "仅放大 + pixel/VSR did not take the pure-pixel path")
+    check("H3LatentUpscale" not in kinds,
+          "仅放大 + pixel/VSR still round-tripped through the latent upscaler")
+    # One decode for the first pass is unavoidable (preview, drift, anchors).
+    # The old path added decode -> VSR -> encode -> decode on top of it, which
+    # re-softened exactly the edges VSR had just sharpened.
+    check(kinds.count("VAEDecode") == 1 and "VAEEncode" not in kinds,
+          "仅放大 + pixel/VSR still pays an extra VAE round trip")
+
+    latent_graph = _second_pass_graph(mode="仅放大（不二采·最快）", model=None)
+    latent_kinds = [entry["class_type"] for entry in latent_graph.values()]
+    check("H3LatentUpscale" in latent_kinds
+          and "H3PixelUpscale" not in latent_kinds,
+          "仅放大 + neural_3d should still upscale in latent space")
+
+
+def test_temporal_chunk_blending_is_seamless_and_optional():
+    calls = []
+
+    def stub(tensor, scale, target_size):
+        # A per-frame spatial resize: whatever window it is given, a frame's
+        # output is identical.  Overlapping windows must therefore agree, so a
+        # partition-of-unity blend has to reproduce the full-context result.
+        calls.append(int(tensor.shape[2]))
+        return torch.nn.functional.interpolate(
+            tensor, size=target_size, mode="trilinear", align_corners=False)
+
+    source = torch.randn(1, 24, 21, 3, 3)
+    with torch.inference_mode():
+        full = neural._forward_bounded(stub, source, 2.0, 6, 6, chunk_steps=0)
+        check(len(calls) == 1,
+              "chunk_steps=0 did not run a single full-context pass")
+        calls.clear()
+        chunked = neural._forward_bounded(
+            stub, source, 2.0, 6, 6, chunk_steps=5, overlap=2)
+    check(len(calls) > 1, "a 21-step clip at chunk_steps=5 was not chunked")
+    check(tuple(chunked.shape) == tuple(full.shape),
+          "temporal chunking changed the output shape")
+    check(torch.allclose(chunked, full, atol=1e-4),
+          "chunk seams no longer reconstruct the full-context output")
 
 
 def test_neural_checkpoint_contract_and_temporal_chunking():
@@ -1089,12 +2163,34 @@ def test_director_example_workflow_is_compact_and_wired():
         check(target_slot < len(target.get("inputs") or []), "bad workflow target slot")
 
 
+def test_material_reorder_preserves_ordinal_prompt_slots():
+    director_ui = (PACKAGE_DIR / "web" / "h3_director_ui.js").read_text(encoding="utf-8")
+    agent_ui = (PACKAGE_DIR / "web" / "minimax_h3_myang_agent_ui.js").read_text(encoding="utf-8")
+    check("text/x-myang-asset-id" in director_ui,
+          "Director material cards no longer expose a drag identity")
+    check("提示词中的序号文字保持不变" in director_ui,
+          "Director reorder UI no longer documents ordinal slot semantics")
+    check("movingAsset.kind !== asset.kind" in director_ui,
+          "Director reorder must stay within one media type")
+    check("remapPromptMentions" not in director_ui,
+          "material reorder must not rewrite authored prompt mentions")
+    check("Native links tell us which sources are still connected" in agent_ui,
+          "Agent sync no longer documents preserving user material order")
+
+
 if __name__ == "__main__":
     tests = [
         test_director_registration_and_variable_timeline,
+        test_director_timeline_isolated_by_task_mode,
+        test_director_transition_controls_motion_context_boundaries,
         test_director_panel_tracks_node_selection_and_resize,
+        test_director_asset_preview_preserves_intrinsic_aspect_and_opens_images,
+        test_director_widget_changes_preserve_focus_and_caret,
         test_director_storyboard_card_import_export_ui,
+        test_director_card_folding_and_layer_persistence_ui,
         test_action_transfer_plan_uses_one_prompt_and_covers_reference,
+        test_action_transfer_uses_reference_duration_not_stale_template_total,
+        test_action_transfer_sampler_windows_never_exceed_the_time_ceiling,
         test_external_action_transfer_rejects_embedded_video,
         test_director_action_source_loads_uploaded_video_and_soundtrack,
         test_reference_clip_and_audio_cover_unaligned_tail,
@@ -1115,7 +2211,7 @@ if __name__ == "__main__":
         test_manifest_numbering_matches_the_generator_and_survives_the_cache_key,
         test_shared_video_uploads_are_rejected_for_continuation,
         test_director_forwards_skill_and_vision_settings_to_the_splitter,
-        test_resume_settings_are_ignored_outside_action_transfer,
+        test_resume_checkbox_gates_manual_cards_and_agent_always_starts_from_head,
         test_director_accepts_turbo_on_its_single_model_input,
         test_director_keeps_user_selected_step_inside_turbo_allowed_profile,
         test_director_keeps_queued_legacy_recommended_steps_compatible,
@@ -1124,11 +2220,27 @@ if __name__ == "__main__":
         test_director_broadcast_never_breaks_a_run,
         test_director_builds_integrated_optional_detail_pass,
         test_director_disables_raw_segment_copy_when_detail_is_off,
+        test_pass1_checkpoint_modes_save_or_skip_first_sampler,
+        test_single_pass1_video_can_enter_detail_without_sampling_again,
+        test_pass1_checkpoint_round_trip_preserves_av_streams_and_contract,
+        test_pixel_detail_path_receives_vram_headroom_and_preview_cadence,
+        test_first_pass_memory_profiles_control_cleanup_and_clear_preview_decode,
+        test_precondition_memory_barrier_evicts_dit_before_vae,
+        test_precondition_release_keeps_aimdo_ram_but_drops_gpu_pages,
+        test_director_builds_installed_opt_in_enhancements,
+        test_long_video_builds_motion_then_face_pipeline,
+        test_face_detector_rejects_a_truncated_pytorch_archive,
+        test_long_video_stops_on_face_detector_preflight_before_graph_sampling,
         test_long_video_uses_variable_shot_windows,
         test_long_video_routes_each_shot_action_material_lazily,
         test_neural_checkpoint_contract_and_temporal_chunking,
         test_director_example_workflow_is_compact_and_wired,
+        test_material_reorder_preserves_ordinal_prompt_slots,
     ]
     for test in tests:
-        test()
+        try:
+            test()
+        except SkipTest as reason:
+            print("SKIP", test.__name__, "-", reason)
+            continue
         print("PASS", test.__name__)

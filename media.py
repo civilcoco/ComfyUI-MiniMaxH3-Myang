@@ -23,7 +23,7 @@ import folder_paths
 from comfy_api.latest import InputImpl
 
 from . import core
-from .media_catalog import MyangMediaAsset, MyangMediaCatalog, video_stream
+from .media_catalog import MyangMediaAsset, MyangMediaCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +104,9 @@ class H3ShotMedia:
             normalized.append((kind, raw))
 
         keep_global = str(asset_mode) == "叠加全局素材"
-        assets_out = list(media.assets) if keep_global and isinstance(media, MyangMediaCatalog) else []
-        next_index = max([asset.slot for asset in assets_out] + [0]) + 1
+        items = list(getattr(media, "items", ()) or ()) if keep_global else []
+        links = list(getattr(media, "links", ()) or ()) if keep_global else []
+        next_index = max([int(getattr(item, "input_index", 0)) for item in items] + [0]) + 1
         action_frames = None
         action_audio = None
 
@@ -121,7 +122,7 @@ class H3ShotMedia:
                 if str(asset.get("role") or "reference") == "action":
                     if action_frames is not None:
                         raise ValueError("每个镜头只能指定一个动作源视频")
-                    frames, soundtrack, source_fps = video_stream(value)
+                    frames, soundtrack, source_fps = core._video_parts(value)
                     frames = core._to_24fps(frames, source_fps)
                     needed = int(required_frames)
                     if int(frames.shape[0]) < needed:
@@ -139,17 +140,28 @@ class H3ShotMedia:
                 value = {"waveform": waveform.unsqueeze(0),
                          "sample_rate": int(sample_rate)}
 
-            assets_out.append(MyangMediaAsset(
-                slot=next_index,
-                kind=kind,
-                payload=value,
-                filename=name,
-                label=str(asset.get("label") or name),
-                origin="director_shot",
-            ))
+            items.append(MyangMediaAsset(
+                input_index=next_index, media_type=kind, value=value,
+                reference_weight_mode=asset.get("reference_weight_mode", "off"),
+                reference_weight=asset.get("reference_weight", 1.0)))
+            try:
+                reference_weight = max(0.25, min(
+                    3.0, float(asset.get("reference_weight") or 1.0)))
+            except (TypeError, ValueError):
+                reference_weight = 1.0
+            links.append({
+                "order": next_index,
+                "media_type": kind,
+                "filename": name,
+                "subject": str(asset.get("label") or name),
+                "source": "director_shot",
+                "reference_weight_mode": str(
+                    asset.get("reference_weight_mode") or "off"),
+                "reference_weight": reference_weight,
+            })
             next_index += 1
 
-        bundle = MyangMediaCatalog(tuple(assets_out))
+        bundle = MyangMediaCatalog(items=tuple(items), links=tuple(links))
         return (bundle, action_frames if action_frames is not None else _empty_video(),
                 action_audio if action_audio is not None else _empty_audio())
 
@@ -173,22 +185,36 @@ class H3MediaSwapClip:
         }
 
     def swap(self, media, clip, video_ordinal=1):
-        if not isinstance(media, MyangMediaCatalog):
+        if not hasattr(media, "items"):
             raise ValueError(
                 "media 不是 Agent 输出的素材包。把 MiniMaxH3MediaAgent 的 media 输出接过来。")
 
-        updated, replaced = media.replacing_video(int(video_ordinal), clip)
-        if replaced:
-            return (updated,)
+        items = list(media.items)
+        seen = 0
+        for k, item in enumerate(items):
+            if item.media_type != "video":
+                continue
+            seen += 1
+            if seen == int(video_ordinal):
+                try:
+                    items[k] = item.carrying(clip)
+                except (AttributeError, TypeError, ValueError):
+                    items[k] = MyangMediaAsset(
+                        input_index=int(getattr(item, "input_index", k + 1)),
+                        media_type="video",
+                        value=clip,
+                    )
+                return (MyangMediaCatalog(
+                    items=tuple(items), links=tuple(getattr(media, "links", ()) or ())),)
 
         # No video in the bundle: the operator wired only stills to the Agent.
         # Append the clip so the loop still works; it lands last, so it is the
         # highest-numbered media and the prompt's @视频1 refers to it.
-        ordinal = sum(asset.kind == "video" for asset in media.assets) + 1
-        appended = media.appended(MyangMediaAsset(
-            slot=media.next_slot(), kind="video", payload=clip, origin="segment_swap"))
-        logger.info("H3-Myang: 素材包里没有目标视频，参考视频切片作为 @视频%d 追加", ordinal)
-        return (appended,)
+        index = max([it.input_index for it in items] + [0]) + 1
+        items.append(MyangMediaAsset(input_index=index, media_type="video", value=clip))
+        logger.info("H3-Myang: 素材包里没有视频，参考视频切片作为 @视频%d 追加", seen + 1)
+        return (MyangMediaCatalog(
+            items=tuple(items), links=tuple(getattr(media, "links", ()) or ())),)
 
 
 class H3ReferenceClip:

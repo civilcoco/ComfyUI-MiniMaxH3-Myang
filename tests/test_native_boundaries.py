@@ -16,7 +16,7 @@ for path in (str(PACKAGE_DIR.parent.parent), str(PACKAGE_DIR.parent)):
 
 core = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
 legacy = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-media_catalog = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
+native = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
 
 
 def check_raises(needle, function):
@@ -44,7 +44,7 @@ def run(plan_json, task, overlap, ref_video=None,
     h3 = SimpleNamespace(
         video_vae=object(), audio_vae=object(),
         names={"model": "minimax/minimax_h3_ref2va_int8.safetensors"})
-    return legacy.H3LongVideo().run(
+    return native.H3LongVideo().run(
         h3=h3, model=object(), sampler=object(), plan_json=plan_json,
         task_mode=task, resolution="480P", aspect_ratio="16:9",
         width=864, height=480, steps=8, denoise=1.0,
@@ -93,9 +93,9 @@ def test_modern_video_and_soundtrack_are_normalised():
                        "sample_rate": 32000},
                 frame_rate=30.0)
 
-    media = media_catalog.MyangMediaCatalog(assets=(
-        media_catalog.MyangMediaAsset(1, "video", ModernVideo()),
-    ))
+    media = SimpleNamespace(items=(
+        SimpleNamespace(input_index=1, media_type="video",
+                        value=ModernVideo()),), links=())
     old_core = core._core
     core._core = lambda: FakeCore
     try:

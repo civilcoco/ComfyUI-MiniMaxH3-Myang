@@ -1,16 +1,10 @@
-# Optional Agent Skills
+# Agent Skills
 
-This directory is intentionally distributed without third-party Skill content.
+这里保存由“沐阳 H3 · Media Agent”读取的可选提示词 Skill。
 
-- The Media Agent works without an external Skill and falls back to its built-in
-  media-reference and prompt-writing rules.
-- Install only Skills whose license permits redistribution and use.
-- A personal Skill directory can be supplied with `MINIMAX_H3_SKILLS_DIR`.
-- Local directory import is disabled by default. To enable it, set
-  `MINIMAX_H3_SKILLS_IMPORT_DIR` to a dedicated import-only directory; the HTTP
-  endpoint will reject paths outside that directory.
-- `_skill_index.json` and `_skill_memory.json` are runtime caches and must not be
-  committed or included in release archives.
+- 可在 ComfyUI 的“沐阳 H3：Agent 技能管理”中导入、编辑或删除。
+- `_skill_index.json` 和 `_skill_memory.json` 是运行时缓存，不应提交到 Git。
+- 也可设置环境变量 `MINIMAX_H3_SKILLS_DIR`，额外读取你自己的 Skill 目录。
+- 节点没有外部 Skill 也能工作，会使用代码内置的严格素材引用规则。
 
-MiniMax Hub and MiniMax H3 documentation are not bundled by this project. Obtain
-them from their official source and review their current terms before use.
+开源发布前，请确认自行导入的 Skill 具有可再分发许可证。

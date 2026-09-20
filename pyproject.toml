@@ -1,7 +1,7 @@
 [project]
 name = "minimax-h3-myang"
-version = "0.1.0"
-description = "Long-video directing, native temporal anchors, media-aware prompting and AV stitching for MiniMax H3 in ComfyUI."
+version = "0.2.0"
+description = "Long-video directing, native temporal anchors, media-aware prompting, AV stitching and optional refinement for MiniMax H3 in ComfyUI."
 authors = [{ name = "沐阳Myang" }]
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -2,8 +2,6 @@
 
 SPDX-License-Identifier: GPL-3.0-only
 
-Copyright (C) 2026 Myang
-
 This Media Agent is maintained as part of the Myang package.
 
 The node deliberately treats connected media as the only source of truth. The
@@ -23,6 +21,9 @@ import os
 import re
 import sys
 import asyncio
+import gc
+import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,27 +34,15 @@ from server import PromptServer
 
 try:
     from .media_catalog import (
-        MAX_ASSETS,
-        MyangMediaAsset,
-        MyangMediaCatalog,
-        asset_from_input,
-        audio_track,
-        classify_payload,
-        image_batch,
-        parse_asset_manifest,
-        video_stream,
+        MAX_ASSETS, MyangMediaCatalog, MyangMediaAsset, audio_track,
+        image_batch, classify_payload, parse_asset_manifest,
+        parse_media_links, video_stream,
     )
 except ImportError:
     from media_catalog import (
-        MAX_ASSETS,
-        MyangMediaAsset,
-        MyangMediaCatalog,
-        asset_from_input,
-        audio_track,
-        classify_payload,
-        image_batch,
-        parse_asset_manifest,
-        video_stream,
+        MAX_ASSETS, MyangMediaCatalog, MyangMediaAsset, audio_track,
+        image_batch, classify_payload, parse_asset_manifest,
+        parse_media_links, video_stream,
     )
 
 try:
@@ -64,23 +53,23 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 MAX_SKILL_BYTES = 512 * 1024
-MAX_SKILL_IMPORT_BYTES = 8 * 1024 * 1024
 MAX_VIDEO_FRAMES = 4
 MAX_DESCRIPTION_CHARS = 600
 SKILL_DIR = Path(__file__).resolve().parent / "skills"
-SKILL_TEXT_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml"}
 MEDIA_TAG_RE = re.compile(r"<\s*(Picture|Image|Video|Audio)\s+(\d+)\s*>", re.IGNORECASE)
+LEGACY_RUNTIME_REF_RE = re.compile(r"__MINIMAX_H3_REF_(\d+)__")
 GENERIC_FILE_RE = re.compile(r"[\w\-.\u4e00-\u9fff]+\.(?:png|jpe?g|webp|bmp|gif|mp4|mov|webm|avi|mkv|mp3|wav|m4a|flac|aac|ogg)", re.IGNORECASE)
 AT_TOKEN_RE = re.compile(r"(?<![\w.])@([^\s@#<>，。；;,.!！?？:：()（）\[\]{}\"']+)")
 EDITOR_AT_RE = re.compile(r"(?<![\w])@([^\s@#<>，。；;!！?？:：()（）\[\]{}\"']+(?:[\t ]+\d+)?)")
-EDITOR_INDEX_RE = re.compile(r"@(图片|图|视频|音频|声音)[\t _]*(\d+)")
 DIALOGUE_LINE_RE = re.compile(r"(?m)(^|\n)[ \t]*#[ \t]*([^\n]+)")
 
 DEFAULT_AGENT_RULE = """你是 MiniMax H3 的媒体感知提示词 Agent。你的任务是改写成可直接用于 MiniMax H3 参考生视频的高质量提示词。
 
 硬性规则：
 1. 只能引用 AVAILABLE MEDIA 中列出的媒体标签，标签必须逐字使用，例如 <Picture 1>、<Video 2>、<Audio 1>。
-2. 不得引用、推测或描述任何不在 AVAILABLE MEDIA 中的素材；没有上传的内容必须明确忽略，不能假设它存在。
+2. AVAILABLE MEDIA 是候选白名单，不是必用清单。只引用当前镜头实际出现的主体或真正生效的场景、动作、声音素材；
+   不要为了用素材而新增人物、物体或剧情。没有合适素材时可以完全不引用；主体定义只写当前视频实际出现且被选中的主体。
+   不得引用、推测或描述任何不在 AVAILABLE MEDIA 中的素材；没有上传的内容必须明确忽略，不能假设它存在。
 3. 不得输出 Markdown 代码块、解释说明、思考过程、JSON 或"最终提示词："之类的前言。若 Skill 规定了输出结构（例如 integrated_multimodal_description / overall_soundscape / non_diegetic_music 这类字段名，或 [Shot N] 分镜标记），必须严格按 Skill 的结构输出，这些字段名和标记属于正文的一部分，不算额外标题。
 4. 普通画面描述保持自然语言；需要人物说出的台词必须使用 <d>台词</d> 包装，可保留输入中的台词块。
 5. 保留用户原始意图、镜头顺序、风格、情绪和动作约束；如果原始输入已经引用了素材，必须保持该引用语义。
@@ -118,83 +107,6 @@ def _skill_directories() -> list[Path]:
     return dirs
 
 
-def _path_is_within(path: Path, root: Path) -> bool:
-    """Return whether a resolved path is contained by a resolved root."""
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _safe_skill_leaf(name: str) -> str | None:
-    """Accept one opaque filename/package id, never a filesystem path."""
-    value = str(name or "").strip()
-    if not value or value in {".", ".."}:
-        return None
-    candidate = Path(value)
-    if candidate.is_absolute() or candidate.name != value:
-        return None
-    if "/" in value or "\\" in value or "\x00" in value:
-        return None
-    return value
-
-
-def _contained_skill_candidate(root: Path, name: str) -> Path | None:
-    leaf = _safe_skill_leaf(name)
-    if leaf is None:
-        return None
-    resolved_root = root.resolve()
-    candidate = (resolved_root / leaf).resolve()
-    return candidate if _path_is_within(candidate, resolved_root) else None
-
-
-def _resolve_skill_import_source(dir_path: str) -> Path:
-    """Resolve an import directory inside the administrator-approved root."""
-    configured = os.environ.get("MINIMAX_H3_SKILLS_IMPORT_DIR", "").strip()
-    if not configured:
-        raise ValueError(
-            "Local directory import is disabled. Set "
-            "MINIMAX_H3_SKILLS_IMPORT_DIR to a dedicated import directory first.")
-    import_root = Path(configured).expanduser().resolve()
-    if not import_root.is_dir():
-        raise ValueError("MINIMAX_H3_SKILLS_IMPORT_DIR is not an existing directory")
-    requested = Path(str(dir_path or "").strip()).expanduser()
-    source = (requested if requested.is_absolute() else import_root / requested).resolve()
-    if not _path_is_within(source, import_root):
-        raise ValueError("Import path must stay inside MINIMAX_H3_SKILLS_IMPORT_DIR")
-    if not source.is_dir():
-        raise ValueError("Import path is not an existing directory")
-    return source
-
-
-def _read_import_package(entry: Path) -> list[tuple[Path, bytes]]:
-    """Validate a text-only Skill package before copying any of it."""
-    if entry.is_symlink():
-        raise ValueError("symbolic links are not allowed")
-    files: list[tuple[Path, bytes]] = []
-    total = 0
-    for item in sorted(entry.rglob("*")):
-        if item.is_symlink():
-            raise ValueError(f"symbolic link is not allowed: {item.name}")
-        if item.is_dir():
-            continue
-        if item.suffix.lower() not in SKILL_TEXT_EXTENSIONS:
-            raise ValueError(f"unsupported file type: {item.name}")
-        raw = item.read_bytes()
-        if len(raw) > MAX_SKILL_BYTES * 4:
-            raise ValueError(f"file is too large: {item.name}")
-        try:
-            raw.decode("utf-8-sig")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"file is not UTF-8: {item.name}") from exc
-        total += len(raw)
-        if total > MAX_SKILL_IMPORT_BYTES:
-            raise ValueError("Skill package exceeds the total import size limit")
-        files.append((item.relative_to(entry), raw))
-    return files
-
-
 def _skill_names() -> list[str]:
     names: list[str] = ["none"]
     seen = set(["none"])
@@ -205,8 +117,6 @@ def _skill_names() -> list[str]:
             continue
         for entry in sorted(s_dir.iterdir()):
             if entry.name.startswith((".", "_")):
-                continue
-            if entry.is_symlink():
                 continue
             if entry.is_dir() and ((entry / "SKILL.md").is_file() or (entry / "SKILL.cn.md").is_file()):
                 name = entry.name
@@ -221,11 +131,10 @@ def _skill_names() -> list[str]:
             continue
         for entry in sorted(s_dir.iterdir()):
             # "_" is reserved for our own bookkeeping (the cached skill index).
-            if entry.name.startswith((".", "_")) or entry.name in seen:
+            if (entry.name.startswith((".", "_")) or entry.name in seen
+                    or entry.name.casefold() in {"readme.md", "license", "license.md"}):
                 continue
-            if entry.is_symlink():
-                continue
-            if entry.is_file() and entry.suffix.lower() in SKILL_TEXT_EXTENSIONS:
+            if entry.is_file() and entry.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml"}:
                 if entry.stem in seen or entry.name in seen:
                     continue
                 names.append(entry.name)
@@ -237,14 +146,12 @@ def _get_skill_target(name: str) -> Path | None:
     if not name or name == "none":
         return None
     for s_dir in _skill_directories():
-        candidate = _contained_skill_candidate(s_dir, name)
-        if candidate is None or candidate.is_symlink():
-            continue
-        if candidate.is_file() and candidate.suffix.lower() in SKILL_TEXT_EXTENSIONS:
-            return candidate
-        if candidate.is_dir() and ((candidate / "SKILL.md").is_file()
-                                   or (candidate / "SKILL.cn.md").is_file()):
-            return candidate
+        p_file = s_dir / name
+        if p_file.is_file() and p_file.suffix.lower() in {".md", ".txt", ".json", ".yaml", ".yml"}:
+            return p_file
+        p_dir = s_dir / name
+        if p_dir.is_dir() and ((p_dir / "SKILL.md").is_file() or (p_dir / "SKILL.cn.md").is_file()):
+            return p_dir
     return None
 
 
@@ -295,12 +202,11 @@ if _prompt_server is not None:
             data = await request.json()
         except Exception:
             return web.json_response({"success": False, "error": "Expected JSON payload"}, status=400)
-        requested_name = str(data.get("filename") or data.get("name") or "").strip()
-        filename = _safe_skill_leaf(requested_name)
-        if filename is None:
-            return web.json_response({"success": False, "error": "A plain filename is required"}, status=400)
+        filename = Path(str(data.get("filename") or data.get("name") or "")).name
+        if not filename:
+            return web.json_response({"success": False, "error": "Filename is required"}, status=400)
 
-        if Path(filename).suffix.lower() not in SKILL_TEXT_EXTENSIONS:
+        if Path(filename).suffix.lower() not in {".md", ".txt", ".json", ".yaml", ".yml"}:
             filename += ".md"
 
         content_raw = data.get("content")
@@ -321,9 +227,7 @@ if _prompt_server is not None:
         except UnicodeDecodeError:
             return web.json_response({"success": False, "error": "Skill file must be UTF-8 text"}, status=400)
 
-        path = _contained_skill_candidate(_skill_dir(), filename)
-        if path is None:
-            return web.json_response({"success": False, "error": "Invalid Skill filename"}, status=400)
+        path = _skill_dir() / filename
         path.write_bytes(raw)
         return web.json_response({"success": True, "filename": filename, "skills": _skill_names()})
 
@@ -332,17 +236,14 @@ if _prompt_server is not None:
         filename = ""
         try:
             data = await request.json()
-            filename = _safe_skill_leaf(str(data.get("filename") or data.get("name") or "")) or ""
+            filename = Path(str(data.get("filename") or data.get("name") or "")).name
         except Exception:
-            filename = _safe_skill_leaf(
-                str(request.query.get("filename") or request.query.get("name") or "")) or ""
+            filename = Path(str(request.query.get("filename") or request.query.get("name") or "")).name
 
         if not filename or filename in {"none", "default.md"}:
             return web.json_response({"success": False, "error": "Cannot delete default skill"}, status=400)
 
-        path = _contained_skill_candidate(_skill_dir(), filename)
-        if path is None:
-            return web.json_response({"success": False, "error": "Invalid Skill filename"}, status=400)
+        path = _skill_dir() / filename
         if path.is_file():
             try:
                 path.unlink()
@@ -353,11 +254,12 @@ if _prompt_server is not None:
 
     @_prompt_server.routes.post("/minimax-h3-agent/skills/upload-dir")
     async def upload_skill_directory(request):
-        """Import Skills from an administrator-approved local directory.
+        """Batch-import all skill files from a local directory into the skill library.
 
-        The source must be contained by ``MINIMAX_H3_SKILLS_IMPORT_DIR``.
-        Packages are copied as validated UTF-8 text only; symlinks, binary files
-        and over-sized packages are rejected.
+        Scans for single files (.md/.txt/.json/.yaml/.yml) and directory packages
+        (containing SKILL.md or SKILL.cn.md). Copies them into skills/ so they
+        appear in the manager. Skills still need to be "learned" before showing
+        in the preset dropdown.
         """
         try:
             data = await request.json()
@@ -368,23 +270,24 @@ if _prompt_server is not None:
         if not dir_path_str:
             return web.json_response({"success": False, "error": "dir_path is required"}, status=400)
 
-        try:
-            src_dir = _resolve_skill_import_source(dir_path_str)
-        except ValueError as exc:
-            return web.json_response({"success": False, "error": str(exc)}, status=403)
+        src_dir = Path(dir_path_str).expanduser()
+        if not src_dir.is_dir():
+            return web.json_response({"success": False, "error": f"Not a directory: {dir_path_str}"}, status=400)
 
+        skill_extensions = {".md", ".txt", ".json", ".yaml", ".yml"}
         dest = _skill_dir()
         imported = []
         skipped = []
 
         for entry in sorted(src_dir.iterdir()):
             name = entry.name
-            if name.startswith(".") or name.startswith("_") or entry.is_symlink():
+            if name.startswith(".") or name.startswith("_"):
                 continue
 
             if entry.is_file():
-                if entry.suffix.lower() not in SKILL_TEXT_EXTENSIONS:
+                if entry.suffix.lower() not in skill_extensions:
                     continue
+                target = dest / name
                 try:
                     raw = entry.read_bytes()
                     if len(raw) > MAX_SKILL_BYTES * 4:
@@ -394,10 +297,6 @@ if _prompt_server is not None:
                         raw.decode("utf-8-sig")
                     except UnicodeDecodeError:
                         skipped.append(f"{name} (not UTF-8)")
-                        continue
-                    target = _contained_skill_candidate(dest, name)
-                    if target is None:
-                        skipped.append(f"{name} (invalid name)")
                         continue
                     target.write_bytes(raw)
                     imported.append(name)
@@ -411,22 +310,13 @@ if _prompt_server is not None:
                 )
                 if not has_skill:
                     continue
-                target = _contained_skill_candidate(dest, name)
-                if target is None:
-                    skipped.append(f"{name}/ (invalid name)")
-                    continue
+                target = dest / name
                 if target.exists():
                     skipped.append(f"{name}/ (already exists)")
                     continue
                 try:
-                    package_files = _read_import_package(entry)
-                    target.mkdir()
-                    for relative, raw in package_files:
-                        output = (target / relative).resolve()
-                        if not _path_is_within(output, target.resolve()):
-                            raise ValueError("package path escaped its destination")
-                        output.parent.mkdir(parents=True, exist_ok=True)
-                        output.write_bytes(raw)
+                    import shutil
+                    shutil.copytree(entry, target)
                     imported.append(f"{name}/")
                 except Exception as exc:
                     skipped.append(f"{name}/ ({exc})")
@@ -492,6 +382,17 @@ if _prompt_server is not None:
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
 
+    @_prompt_server.routes.post("/minimax-h3-agent/llm-stop")
+    async def stop_active_llm_requests(request):
+        """Interrupt only active Myang LLM/VLM waits; leave ComfyUI running."""
+        from . import llm_service as _llm
+        stopped = _llm.cancel_active_http_requests()
+        return web.json_response({
+            "success": True,
+            "stopped": stopped,
+            "message": "已停止当前 LLM 请求" if stopped else "当前没有正在等待的 LLM 请求",
+        })
+
     @_prompt_server.routes.post("/minimax-h3-agent/learn")
     async def learn_agent_skills(request):
         """Read Skills and distil them into reusable writing specs.
@@ -528,20 +429,36 @@ if _prompt_server is not None:
                 results.append({"name": name, "success": False, "error": "empty skill"})
                 continue
             memory[name] = learned
+            learned_by = str(learned.get("learned_by") or "file")
+            partial = learned_by == "llm_partial"
+            progress = learned.get("learning_progress") or {}
+            pending_chunks = int(learned.get("pending_chunks") or 0)
+            pending_merge = bool(partial and not pending_chunks and not progress.get("merge_complete"))
             results.append({
                 "name": name,
                 "success": True,
                 "chars": learned["chars"],
                 "digest_chars": learned.get("digest_chars", 0),
-                "learned_by": learned.get("learned_by", "file"),
+                "learned_by": learned_by,
+                "complete": not partial,
+                "partial": partial,
+                "completed_chunks": int(learned.get("completed_chunks") or 0),
+                "pending_chunks": pending_chunks,
+                "pending_merge": pending_merge,
                 "notes": learned.get("notes", []),
             })
         _write_skill_memory(memory)
 
         learned_count = sum(1 for item in results if item.get("success"))
+        complete_count = sum(
+            1 for item in results if item.get("success") and item.get("complete"))
+        partial_count = sum(
+            1 for item in results if item.get("success") and item.get("partial"))
         return web.json_response({
             "success": learned_count > 0,
             "learned": learned_count,
+            "complete": complete_count,
+            "partial": partial_count,
             "total": len(targets),
             "llm": bool(llm_service),
             "results": results,
@@ -571,6 +488,64 @@ if _prompt_server is not None:
             "learned_by": entry.get("learned_by", ""),
             "chars": entry.get("chars", 0),
             "digest_chars": entry.get("digest_chars", 0),
+            "completed_chunks": entry.get("completed_chunks", 0),
+            "pending_chunks": entry.get("pending_chunks", 0),
+            "pending_merge": bool(
+                entry.get("learned_by") == "llm_partial"
+                and not int(entry.get("pending_chunks") or 0)
+                and not (entry.get("learning_progress") or {}).get("merge_complete")
+            ),
+            "notes": entry.get("notes", []),
+        })
+
+    @_prompt_server.routes.post("/minimax-h3-agent/digest")
+    async def save_skill_digest(request):
+        """Save a user-edited digest without changing the Skill source file."""
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Expected JSON"}, status=400)
+
+        name = str(data.get("name") or "").strip()
+        digest = str(data.get("digest") or "").strip()
+        if not name or name == "none":
+            return web.json_response({"error": "No skill selected"}, status=400)
+        if name not in _skill_names():
+            return web.json_response({"error": f"Skill not found: {name}"}, status=404)
+        if len(digest.encode("utf-8")) > MAX_SKILL_BYTES:
+            return web.json_response({"error": "Summary exceeds size limit"}, status=400)
+
+        memory = _skill_memory()
+        entry = memory.get(name)
+        if not isinstance(entry, dict) or not entry.get("full_text"):
+            try:
+                entry = await asyncio.to_thread(_learn_skill, name)
+            except Exception as exc:  # noqa: BLE001 - return an actionable editor error
+                return web.json_response({"error": str(exc)}, status=500)
+        if not entry.get("full_text"):
+            return web.json_response({"error": "Skill content is empty"}, status=400)
+
+        entry["digest"] = digest
+        entry["digest_chars"] = len(digest)
+        entry["profile_version"] = 0
+        entry["learning_progress"] = {}
+        entry["completed_chunks"] = 0
+        entry["pending_chunks"] = 0
+        if digest:
+            entry["learned_by"] = "manual"
+            entry["notes"] = ["用户手动编辑了学习总结；运行时优先使用该版本"]
+        else:
+            entry["learned_by"] = "file"
+            entry["notes"] = ["用户清空了学习总结；运行时回退技能原文"]
+        memory[name] = entry
+        _write_skill_memory(memory)
+        return web.json_response({
+            "success": True,
+            "name": name,
+            "digest": digest,
+            "digest_chars": len(digest),
+            "learned_by": entry["learned_by"],
+            "message": "中文总结已保存" if digest else "总结已清空，运行时改用技能原文",
         })
 
 
@@ -653,6 +628,9 @@ def _read_skill(skill_name_or_path: Any, pasted_text: str = "", budget: int = 0)
 
 SKILL_AUTO = "auto"
 SKILL_INDEX_FILENAME = "_skill_index.json"
+_auto_skill_route_cache: dict[str, str] = {}
+_auto_skill_plan_cache: dict[str, list[dict[str, Any]]] = {}
+_auto_skill_last_success = ""
 # The official packages run to ~40k characters of SKILL.cn.md plus another ~40k
 # of reference manuals. Injecting that whole wall of text into every rewrite is
 # what made the system prompt feel "off": it costs a fortune and buries the few
@@ -784,19 +762,23 @@ def _frontmatter_description(path: Path) -> str:
     return ""
 
 
+def _skill_source_hash(name: str) -> str:
+    text, _ = _read_skill(name, budget=0)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _skill_signature() -> str:
-    parts: list[str] = []
+    # Hash actual content, including package references; directory timestamps
+    # do not change when a SKILL.md or an existing reference is edited.
+    parts = []
     for name in _skill_names():
-        if name == "none":
-            continue
-        target = _get_skill_target(name)
-        if target is None:
-            continue
-        try:
-            parts.append(f"{name}:{int(target.stat().st_mtime)}")
-        except OSError:
-            parts.append(f"{name}:0")
+        if name != "none":
+            try:
+                parts.append(name + ":" + _skill_source_hash(name))
+            except OSError:
+                parts.append(name + ":unavailable")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
 
 
 def _build_skill_index() -> list[dict[str, str]]:
@@ -1275,55 +1257,111 @@ def _learn_skill(name: str, llm_service: str = "", ollama_auto_unload: bool = Fa
     return entry
 
 
-def _skill_memory(force: bool = False) -> dict[str, dict[str, Any]]:
-    """Learned Skill texts, keyed by Skill name.
+_skill_memory_lock = threading.RLock()
 
-    Shares _skill_signature() with the index cache, so editing any Skill file
-    invalidates both: a stale full-text memory would silently keep feeding the
-    old writing rules to the LLM.
-    """
+
+def _read_skill_memory_file():
     cache_path = _skill_dir() / SKILL_MEMORY_FILENAME
-    signature = _skill_signature()
-    if not force and cache_path.is_file():
+    for path in (cache_path, cache_path.with_suffix(".json.bak")):
         try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8-sig"))
-            if isinstance(cached, dict) and cached.get("signature") == signature:
-                skills = cached.get("skills")
-                if isinstance(skills, dict):
-                    # Older builds marked a one-chunk digest as fully learned
-                    # even when a later chunk failed. Do not keep injecting an
-                    # incomplete half-Skill; the next manual learn will create
-                    # resumable chunk state.
-                    for entry in skills.values():
-                        if not isinstance(entry, dict) or entry.get("learning_progress"):
-                            continue
-                        old_notes = " ".join(str(item) for item in (entry.get("notes") or []))
-                        if entry.get("learned_by") == "llm" and "学习失败" in old_notes:
-                            entry["digest"] = ""
-                            entry["digest_chars"] = 0
-                            entry["learned_by"] = "file"
-                            entry["notes"] = list(entry.get("notes") or []) + [
-                                "检测到旧版不完整分块摘要，运行时已回退全文；重新学习后将启用断点续学"
-                            ]
-                    return skills
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(payload, dict) and isinstance(payload.get("skills"), dict):
+                return payload
         except (OSError, ValueError):
             pass
-    return {}
+    return {"skills": {}}
+
+
+def _valid_skill_entries(payload):
+    valid = {}
+    for name, record in payload.get("skills", {}).items():
+        if not isinstance(record, dict) or _get_skill_target(name) is None:
+            continue
+        try:
+            text, _ = _read_skill(name, budget=0)
+        except OSError:
+            continue
+        fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        # Migrate old caches by comparing their full text, even if a different
+        # skill invalidated the old whole-directory signature.
+        if record.get("source_hash"):
+            if record["source_hash"] != fingerprint:
+                continue
+        elif record.get("full_text") != text:
+            continue
+        entry = dict(record, source_hash=fingerprint)
+        old_notes = " ".join(str(item) for item in (entry.get("notes") or []))
+        if (not entry.get("learning_progress")
+                and entry.get("learned_by") == "llm" and "学习失败" in old_notes):
+            entry.update(digest="", digest_chars=0, learned_by="file")
+            entry["notes"] = list(entry.get("notes") or []) + [
+                "检测到旧版不完整分块摘要；重新学习可启用断点续学"]
+        valid[name] = entry
+    return valid
+
+
+def _skill_memory(force: bool = False) -> dict[str, dict[str, Any]]:
+    """Validate each skill separately; unrelated edits never discard digests."""
+    with _skill_memory_lock:
+        return _valid_skill_entries(_read_skill_memory_file())
+
+
+def _atomic_skill_json(path, payload):
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        temporary.write_text(json.dumps(
+            payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _write_skill_memory(skills: dict[str, dict[str, Any]]) -> None:
     cache_path = _skill_dir() / SKILL_MEMORY_FILENAME
     try:
-        cache_path.write_text(
-            json.dumps(
-                {"signature": _skill_signature(), "skills": skills},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        with _skill_memory_lock:
+            previous = _read_skill_memory_file()
+            merged = _valid_skill_entries(previous)
+            merged.update(_valid_skill_entries({"skills": skills}))
+            if previous.get("skills"):
+                _atomic_skill_json(cache_path.with_suffix(".json.bak"), previous)
+            _atomic_skill_json(cache_path, {
+                "version": 2, "signature": _skill_signature(), "skills": merged})
     except OSError as exc:
         logger.warning("[MiniMax H3 Agent] could not persist skill memory: %s", exc)
+
+
+
+def _legacy_skill_digest(name: str, full_text: str) -> str:
+    """Optionally read a user-supplied legacy digest during migration.
+
+    The Myang package must not depend on another node package being installed.
+    A path can still be supplied explicitly for one-time migration through
+    ``MINIMAX_H3_LEGACY_SKILL_MEMORY``; by default no external package is read.
+    """
+    configured_path = os.environ.get("MINIMAX_H3_LEGACY_SKILL_MEMORY", "").strip()
+    if not configured_path:
+        return ""
+    reference_memory = Path(configured_path).expanduser()
+    if not reference_memory.is_file():
+        return ""
+    try:
+        data = json.loads(reference_memory.read_text(encoding="utf-8-sig"))
+        entry = (data.get("skills") or {}).get(name)
+    except (OSError, ValueError, TypeError):
+        return ""
+    if not isinstance(entry, dict):
+        return ""
+    reference_text = str(entry.get("full_text") or "")
+    digest = str(entry.get("digest") or "").strip()
+    if not digest:
+        return ""
+    # Never import a digest learned from another revision of the Skill.
+    if reference_text and full_text and reference_text != full_text:
+        return ""
+    if not reference_text and int(entry.get("chars") or 0) != len(full_text):
+        return ""
+    return digest
 
 
 def _learned_skill_text(
@@ -1360,6 +1398,18 @@ def _learned_skill_text(
         return "", ""
     digest = str(entry.get("digest") or "")
     full_text = str(entry.get("full_text") or "")
+    legacy_profile = bool(entry.get("profile_version")) or digest.startswith(
+        "【结构化技能画像 v")
+    if legacy_profile and full_text:
+        reference_digest = _legacy_skill_digest(name, full_text)
+        if reference_digest:
+            digest = reference_digest
+            entry["digest"] = digest
+            entry["digest_chars"] = len(digest)
+            entry["profile_version"] = 0
+            entry["learned_by"] = "legacy_skill_memory"
+            memory[name] = entry
+            _write_skill_memory(memory)
     if digest:
         progress = entry.get("learning_progress") or {}
         pending = int(progress.get("pending_chunks") or 0)
@@ -1383,12 +1433,53 @@ SKILL_ROUTER_SYSTEM = """你是 MiniMax H3 的技能路由器。根据用户的�
 依据技能的名称、分类标签和用途摘要判断。若没有明显匹配的技能，输出 none。
 只输出一个 name 字段的原文（或 none），不要输出解释、标点或引号。"""
 
+SKILL_PLAN_ROUTER_SYSTEM = """你是 MiniMax H3 的逐镜头技能路由器。一次为所有分镜选择写作技能，但不写最终提示词。
+每段可以使用不同组合：恰好 1 个 PRIMARY（负责最终输出结构），0-2 个 OVERLAYS（只补充该段需要的风格、镜头、动作或声音细节），0-1 个 REVIEWERS（只在同一次写作中做轻量自检）。
+不要让多个技能争夺字段名和字段顺序；OVERLAYS 与 REVIEWERS 不得覆盖 PRIMARY 的输出结构。
+creative-director、multishot-planner 属于规划技能，不能作为最终写作 PRIMARY；prompt-reviewer 只能放 REVIEWERS。
+只能逐字使用候选列表中的 name。没有合适辅助技能就写 none。不要输出 JSON 或 Markdown 代码块。
+每段只输出一行，协议如下：
+SEGMENT 1 | PRIMARY: h3-prompt-writing | OVERLAYS: none | REVIEWERS: none | REASON: 简短原因"""
+
+_PLANNING_ONLY_SKILLS = {
+    "minimax-h3-creative-director",
+    "minimax-h3-multishot-planner",
+}
+_REVIEW_ONLY_SKILLS = {"minimax-h3-prompt-reviewer"}
+_PREFERRED_WRITER_SKILLS = (
+    "h3-prompt-writing",
+    "minimax-h3-reference-video-prompt",
+    "minimax-h3-keyframe-video-prompt",
+    "minimax-h3-text-video-prompt",
+)
+
 
 def _select_skill_auto(llm_service: str, user_prompt: str, ollama_auto_unload: bool) -> tuple[str, str]:
     """Pick a Skill from the cached index with one short LLM call."""
+    global _auto_skill_last_success
     index = _skill_index()
     if not index:
         return "none", "no skills available"
+    names = [entry["name"] for entry in index]
+    cache_key = hashlib.sha256(
+        (_skill_signature() + "\0" + str(user_prompt or "")).encode("utf-8")
+    ).hexdigest()
+    cached = _auto_skill_route_cache.get(cache_key)
+    if cached == "none":
+        return "none", "auto cache: none"
+    if cached in names:
+        return cached, f"auto cache: {cached}"
+
+    def unavailable_fallback(reason: str) -> tuple[str, str]:
+        preferred = _auto_skill_last_success if _auto_skill_last_success in names else ""
+        if not preferred:
+            preferred = next(
+                (name for name in names if name.casefold() == "h3-prompt-writing"), "")
+        if preferred:
+            _auto_skill_route_cache[cache_key] = preferred
+            return preferred, f"auto fallback: {preferred}（{reason}）"
+        return "none", f"auto: {reason}"
+
     listing = "\n".join(
         f"- {entry['name']} | {entry.get('display', '')} | {entry.get('tag', '')} | {entry.get('summary', '')}"
         for entry in index
@@ -1403,28 +1494,315 @@ def _select_skill_auto(llm_service: str, user_prompt: str, ollama_auto_unload: b
             llm_service, [(question, SKILL_ROUTER_SYSTEM)], ollama_auto_unload, 0, "路由"
         )
         if not raw:
-            return "none", "auto: 路由无响应"
+            return unavailable_fallback("路由无响应")
     except Exception as exc:  # noqa: BLE001 - routing must never break generation
         if _is_interrupt(exc):
             raise
         logger.warning("[MiniMax H3 Agent] auto skill selection failed: %s", exc)
-        return "none", f"auto failed ({exc})"
+        return unavailable_fallback(f"路由失败: {str(exc)[:80]}")
 
     answer = str(raw or "").strip().strip("`").strip().strip('"\'').strip()
     answer = answer.splitlines()[-1].strip() if answer else ""
     if not answer or answer.lower() == "none":
+        _auto_skill_route_cache[cache_key] = "none"
         return "none", "auto: no match"
 
-    names = [entry["name"] for entry in index]
     for name in names:
         if answer == name:
+            _auto_skill_route_cache[cache_key] = name
+            _auto_skill_last_success = name
             return name, f"auto: {name}"
     lowered = answer.lower()
     for name in names:
         if name.lower() == lowered or name.lower() in lowered:
+            _auto_skill_route_cache[cache_key] = name
+            _auto_skill_last_success = name
             return name, f"auto: {name}"
     logger.warning("[MiniMax H3 Agent] auto skill selection returned unknown name: %r", answer)
-    return "none", f"auto: unrecognised reply ({answer[:40]})"
+    return unavailable_fallback(f"无法识别返回值: {answer[:40]}")
+
+
+def skill_catalog_signature() -> str:
+    """Public cache token for callers that depend on the current Skill set."""
+    return _skill_signature()
+
+
+def _canonical_skill_name(value: Any, names: list[str]) -> str:
+    text = str(value or "").strip().strip("`\"'").strip()
+    text = re.sub(r"^[\s*+\-•]+", "", text).strip()
+    if not text or text.casefold() in {"none", "无", "不使用", "n/a", "null"}:
+        return "none"
+    exact = {name.casefold(): name for name in names}
+    if text.casefold() in exact:
+        return exact[text.casefold()]
+    stem = re.sub(r"\.(?:md|txt|json|ya?ml)$", "", text, flags=re.IGNORECASE).casefold()
+    matches = [name for name in names if re.sub(
+        r"\.(?:md|txt|json|ya?ml)$", "", name, flags=re.IGNORECASE).casefold() == stem]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _skill_name_list(value: Any, names: list[str], limit: int) -> list[str]:
+    values = value if isinstance(value, list) else re.split(r"[,，、;/]+", str(value or ""))
+    result: list[str] = []
+    for raw in values:
+        name = _canonical_skill_name(raw, names)
+        if not name or name == "none" or name in result:
+            continue
+        result.append(name)
+        if len(result) >= int(limit):
+            break
+    return result
+
+
+def _default_writer_skill(names: list[str]) -> str:
+    for preferred in _PREFERRED_WRITER_SKILLS:
+        match = _canonical_skill_name(preferred, names)
+        if match and match != "none":
+            return match
+    return next((name for name in names if name not in _PLANNING_ONLY_SKILLS
+                 and name not in _REVIEW_ONLY_SKILLS), "none")
+
+
+def _normalize_skill_plan_item(raw: Any, index: int, names: list[str]) -> dict[str, Any]:
+    item = raw if isinstance(raw, dict) else {}
+    requested_primary = _canonical_skill_name(
+        item.get("primary") or item.get("PRIMARY"), names)
+    writer_primaries = {
+        resolved for name in _PREFERRED_WRITER_SKILLS
+        if (resolved := _canonical_skill_name(name, names)) not in ("", "none")
+    }
+    demoted_overlays: list[str] = []
+    primary = requested_primary
+    if primary not in writer_primaries:
+        if (primary and primary != "none" and primary not in _PLANNING_ONLY_SKILLS
+                and primary not in _REVIEW_ONLY_SKILLS):
+            # Generator/workflow Skills are useful creative overlays, but they
+            # must not own the final H3 field schema in automatic mode.
+            demoted_overlays.append(primary)
+        primary = _default_writer_skill(names)
+    overlays = []
+    for name in demoted_overlays + _skill_name_list(
+            item.get("overlays") or item.get("overlay") or item.get("OVERLAYS"), names, 4):
+        if (name != primary and name not in _PLANNING_ONLY_SKILLS
+                and name not in _REVIEW_ONLY_SKILLS and name not in overlays):
+            overlays.append(name)
+        if len(overlays) >= 2:
+            break
+    reviewers = [name for name in _skill_name_list(
+        item.get("reviewers") or item.get("reviewer") or item.get("REVIEWERS"), names, 3)
+        if name in _REVIEW_ONLY_SKILLS][:1]
+    planners = [name for name in _skill_name_list(
+        item.get("planners") or item.get("planner") or item.get("PLANNERS"), names, 3)
+        if name in _PLANNING_ONLY_SKILLS][:2]
+    return {
+        "index": int(index),
+        "primary": primary,
+        "overlays": overlays,
+        "reviewers": reviewers,
+        "planners": planners,
+        "reason": re.sub(r"\s+", " ", str(item.get("reason") or item.get("REASON") or "")).strip()[:120],
+    }
+
+
+def _parse_skill_plan(raw: Any, expected_count: int, names: list[str]) -> list[dict[str, Any]]:
+    """Parse forgiving line blocks; missing/invalid rows get a stable local default."""
+    parsed: dict[int, dict[str, Any]] = {}
+    source = re.sub(r"^\s*```(?:json|text|markdown)?|```\s*$", "",
+                    str(raw or "").strip(), flags=re.MULTILINE).strip()
+    try:
+        payload = json.loads(source)
+    except Exception:
+        payload = None
+    rows = payload.get("skill_plan") if isinstance(payload, dict) else payload
+    if isinstance(rows, list):
+        for offset, row in enumerate(rows, 1):
+            if not isinstance(row, dict):
+                continue
+            try:
+                number = int(row.get("index") or row.get("segment") or offset)
+            except (TypeError, ValueError):
+                number = offset
+            if 1 <= number <= int(expected_count):
+                parsed[number] = row
+
+    heading = re.compile(
+        r"(?im)^\s*(?:\[?\s*SEGMENT\s+(\d+)\s*\]?|\[?\s*第\s*(\d+)\s*段\s*\]?)")
+    matches = list(heading.finditer(source))
+    for offset, match in enumerate(matches):
+        number = int(match.group(1) or match.group(2) or 0)
+        if not 1 <= number <= int(expected_count):
+            continue
+        end = matches[offset + 1].start() if offset + 1 < len(matches) else len(source)
+        body = source[match.end():end]
+        row: dict[str, str] = {}
+        for field, aliases in {
+            "primary": "PRIMARY|主技能",
+            "overlays": "OVERLAYS?|辅助技能|叠加技能",
+            "reviewers": "REVIEWERS?|自检技能|审核技能",
+            "planners": "PLANNERS?|规划技能",
+            "reason": "REASON|原因",
+        }.items():
+            found = re.search(
+                rf"(?is)(?:^|[|\n])\s*(?:{aliases})\s*[:=：]\s*(.*?)"
+                rf"(?=\s*[|\n]\s*(?:PRIMARY|主技能|OVERLAYS?|辅助技能|叠加技能|"
+                rf"REVIEWERS?|自检技能|审核技能|PLANNERS?|规划技能|REASON|原因)\s*[:=：]|$)",
+                body)
+            if found:
+                row[field] = found.group(1).strip()
+        if row:
+            parsed[number] = row
+    return [_normalize_skill_plan_item(parsed.get(index, {}), index, names)
+            for index in range(1, int(expected_count) + 1)]
+
+
+def select_skill_plan_auto(
+    llm_service: str,
+    segment_briefs: list[dict[str, Any]],
+    ollama_auto_unload: bool = False,
+) -> tuple[list[dict[str, Any]], str]:
+    """Route all segments in one cheap, non-blocking call.
+
+    The result is advisory. A malformed or unavailable router never cancels the
+    writer; every missing row receives the stable H3 writer Skill locally.
+    """
+    index = _skill_index()
+    names = [entry["name"] for entry in index]
+    count = len(segment_briefs)
+    fallback = [_normalize_skill_plan_item({}, number, names)
+                for number in range(1, count + 1)]
+    if not count or not names:
+        return fallback, "逐镜头技能路由：无可用技能，使用默认写法"
+    if not str(llm_service or "").strip():
+        return fallback, "逐镜头技能路由：未配置 LLM，使用稳定主技能"
+
+    compact_segments = []
+    for offset, item in enumerate(segment_briefs, 1):
+        subjects = item.get("subjects") if isinstance(item, dict) else []
+        subject_names = [str(subject.get("name") or subject.get("id") or "")
+                         for subject in (subjects or []) if isinstance(subject, dict)]
+        compact_segments.append({
+            "index": int(item.get("index") or offset),
+            "duration": round(float(item.get("duration_seconds") or 0), 3),
+            "transition": str(item.get("transition") or ""),
+            "summary": re.sub(r"\s+", " ", str(
+                item.get("segment_goal") or item.get("brief") or "")).strip()[:500],
+            "media": list(item.get("selected_media_tags") or [])[:12],
+            "subjects": [name for name in subject_names if name][:8],
+        })
+    cache_key = hashlib.sha256((
+        _skill_signature() + "\0" + json.dumps(compact_segments, ensure_ascii=False, sort_keys=True)
+    ).encode("utf-8")).hexdigest()
+    cached = _auto_skill_plan_cache.get(cache_key)
+    if cached:
+        return json.loads(json.dumps(cached, ensure_ascii=False)), "逐镜头技能组合（缓存）"
+
+    listing = "\n".join(
+        f"- {entry['name']} | {entry.get('display', '')} | {entry.get('tag', '')} | {entry.get('summary', '')}"
+        for entry in index)
+    segment_text = "\n".join(
+        "SEGMENT %d: %.2fs | %s | 主体=%s | 素材=%s | %s" % (
+            int(item["index"]), float(item["duration"]), item["transition"],
+            "、".join(item["subjects"]) or "无",
+            "、".join(item["media"]) or "无", item["summary"])
+        for item in compact_segments)
+    question = (
+        "候选技能：\n" + listing + "\n\n逐段内容：\n" + segment_text +
+        "\n\n为每段分别选择技能组合。主技能管结构，辅助技能只补内容；按协议逐行输出。")
+    try:
+        # Routing is advisory and cheap. Make exactly one routed request; the
+        # service layer already performs its 15s/30s first-content route probes.
+        # Retrying again here would multiply wait time without improving the
+        # actual segment writer.
+        raw = _expand_with_prompt_assistant(
+            llm_service, question, SKILL_PLAN_ROUTER_SYSTEM,
+            bool(ollama_auto_unload), 0, max_tokens=None)
+        raw = _sanitize_llm_output(raw)
+        if not raw:
+            return fallback, "逐镜头技能路由无正文，使用稳定主技能"
+        plan = _parse_skill_plan(raw, count, names)
+    except Exception as exc:  # noqa: BLE001 - routing is never a generation gate
+        if _is_interrupt(exc):
+            raise
+        logger.warning("[MiniMax H3 Agent] per-segment skill routing failed: %s", exc)
+        return fallback, f"逐镜头技能路由失败，使用稳定主技能：{str(exc)[:80]}"
+    _auto_skill_plan_cache[cache_key] = plan
+    return json.loads(json.dumps(plan, ensure_ascii=False)), "逐镜头技能组合（自动）"
+
+
+def resolve_skill_bundle(
+    primary: str,
+    overlays: Any = None,
+    reviewers: Any = None,
+    skill_text: str = "",
+    budget: int = MAX_SKILL_INJECT_CHARS,
+) -> tuple[str, str, list[str]]:
+    """Merge a segment Skill bundle with one unambiguous structure owner."""
+    names = _skill_names()
+    primary_name = _canonical_skill_name(primary, names)
+    if (not primary_name or primary_name == "none"
+            or primary_name in _PLANNING_ONLY_SKILLS
+            or primary_name in _REVIEW_ONLY_SKILLS):
+        primary_name = _default_writer_skill(names)
+    overlay_names = [name for name in _skill_name_list(overlays, names, 4)
+                     if name != primary_name and name not in _PLANNING_ONLY_SKILLS
+                     and name not in _REVIEW_ONLY_SKILLS][:2]
+    reviewer_names = [name for name in _skill_name_list(reviewers, names, 3)
+                      if name in _REVIEW_ONLY_SKILLS][:1]
+    maximum = max(0, int(budget))
+    chunks: list[str] = []
+    used: list[str] = []
+
+    def append_text(header: str, body: str) -> None:
+        if not body or maximum <= 0:
+            return
+        current = sum(len(chunk) + 2 for chunk in chunks)
+        remaining = maximum - current
+        if remaining <= len(header) + 8:
+            return
+        body_limit = remaining - len(header) - 2
+        chunks.append(header + "\n" + str(body).strip()[:body_limit])
+
+    pasted = str(skill_text or "").strip()
+    if pasted:
+        append_text("【用户自定义规则｜最高优先级】", pasted)
+
+    role_header = (
+        "【技能聚合约束】\n"
+        "PRIMARY 是唯一输出结构所有者；辅助技能只补充本段的风格、镜头、动作、声音与细节，"
+        "不得新增另一套字段或改写字段顺序；自检技能只在本次写作结束前检查一次，不触发二次调用或重试。")
+    append_text(role_header, "按上述职责执行。")
+
+    def load(name: str, limit: int) -> tuple[str, str]:
+        if not name or name == "none":
+            return "", ""
+        learned, label = _learned_skill_text(name, budget=limit)
+        if learned:
+            return _trim_skill_text(learned, limit)[:limit], label
+        content, source = _read_skill(name, "", budget=limit)
+        return content[:limit], source
+
+    content, _source = load(primary_name, min(4600, maximum))
+    if content:
+        append_text(f"【PRIMARY 主技能：{primary_name}｜负责输出结构】", content)
+        used.append(primary_name)
+    for name in overlay_names:
+        content, _source = load(name, min(1500, maximum))
+        if content:
+            append_text(f"【OVERLAY 辅助技能：{name}｜仅补充内容】", content)
+            used.append(name)
+    for name in reviewer_names:
+        content, _source = load(name, min(700, maximum))
+        if content:
+            append_text(f"【REVIEWER 自检技能：{name}｜仅做一次非阻断自检】", content)
+            used.append(name)
+    source_parts = [f"主={primary_name}"]
+    if overlay_names:
+        source_parts.append("辅=" + "+".join(overlay_names))
+    if reviewer_names:
+        source_parts.append("自检=" + "+".join(reviewer_names))
+    if pasted:
+        source_parts.insert(0, "用户规则")
+    return "\n\n".join(chunks), "；".join(source_parts), used
 
 
 def _custom_nodes_dir() -> Path:
@@ -1451,7 +1829,7 @@ def _vlm_service_options() -> list[str]:
 
 def _describe_media_items(
     manifest: list[dict[str, Any]],
-    assets: list[MyangMediaAsset],
+    items: list[MyangMediaAsset],
     vlm_service: str,
     ollama_auto_unload: bool,
 ) -> list[str]:
@@ -1463,17 +1841,17 @@ def _describe_media_items(
     """
     from . import llm_service as _llm
 
-    asset_by_slot = {asset.slot: asset for asset in assets}
+    item_by_input = {int(item.input_index): item for item in items}
     errors: list[str] = []
     for entry in manifest:
-        asset = asset_by_slot.get(int(entry.get("slot") or -1))
-        if asset is None:
+        media_item = item_by_input.get(int(entry.get("input_index") or -1))
+        if media_item is None:
             continue
         tag = str(entry["tag"])
         kind = str(entry["type"])
         try:
             if kind == "image":
-                img_tensor = image_batch(asset.payload)
+                img_tensor = image_batch(media_item.value)
                 description = _llm.call_vlm(
                     vlm_service,
                     [_llm.tensor_to_base64(img_tensor[:1])],
@@ -1481,7 +1859,7 @@ def _describe_media_items(
                     ollama_auto_unload,
                 )
             elif kind == "video":
-                frames, _soundtrack, _fps = video_stream(asset.payload)
+                frames, _soundtrack, _fps = video_stream(media_item.value)
                 total = int(frames.shape[0])
                 if total <= 0:
                     raise ValueError("Reference video has no frames")
@@ -1510,48 +1888,63 @@ def _describe_media_items(
     return errors
 
 
-def _media_manifest(assets: list[MyangMediaAsset]) -> list[dict[str, Any]]:
-    """Describe the same deterministic order consumed by H3Condition."""
-    catalog = MyangMediaCatalog(tuple(assets))
+def _media_manifest(items: list[MyangMediaAsset]) -> list[dict[str, Any]]:
+    # Number within a type by input index, which is how H3Condition counts when
+    # it hands references to the model.  Anything else would advertise a tag the
+    # generator resolves to a different clip.
+    ordered = sorted(items, key=lambda item: int(getattr(item, "input_index", 0)))
+    images = [item for item in ordered if item.media_type == "image"]
+    videos = [item for item in ordered if item.media_type == "video"]
+    audios = [item for item in ordered if item.media_type == "audio"]
     manifest: list[dict[str, Any]] = []
-    counts = {"image": 0, "video": 0, "audio": 0}
-    tags = {"image": "Picture", "video": "Video", "audio": "Audio"}
-    for asset in catalog.ordered():
-        counts[asset.kind] += 1
-        ordinal = counts[asset.kind]
+    for ordinal, item in enumerate(images, 1):
         entry = {
-            "tag": f"<{tags[asset.kind]} {ordinal}>",
-            "type": asset.kind,
+            "tag": f"<Picture {ordinal}>",
+            "type": "image",
             "ordinal": ordinal,
-            "slot": asset.slot,
+            "input_index": item.input_index,
         }
-        if asset.filename:
-            entry["filename"] = asset.filename
-        if asset.label:
-            entry["label"] = asset.label
-            entry["subject_name"] = asset.label[:40]
-        if asset.origin:
-            entry["origin"] = asset.origin
         try:
-            if asset.kind == "image":
-                frames = image_batch(asset.payload)
-                entry["shape"] = list(frames.shape)
-                entry["resolution"] = f"{frames.shape[2]}x{frames.shape[1]}"
-            elif asset.kind == "video":
-                frames, soundtrack, fps = video_stream(asset.payload)
-                entry["shape"] = list(frames.shape)
-                entry["resolution"] = f"{frames.shape[2]}x{frames.shape[1]}"
-                entry["frame_count"] = int(frames.shape[0])
-                entry["fps"] = fps
-                entry["duration"] = round(frames.shape[0] / max(1.0, fps), 1)
-                entry["has_audio"] = soundtrack is not None
-            else:
-                audio = audio_track(asset.payload)
-                waveform = audio.get("waveform") if audio else None
-                sample_rate = int(audio.get("sample_rate") or 32000) if audio else 32000
-                if waveform is not None and sample_rate > 0:
-                    entry["duration"] = round(float(waveform.shape[-1]) / sample_rate, 2)
-                    entry["sample_rate"] = sample_rate
+            img_t = image_batch(item.value)
+            entry["shape"] = list(img_t.shape)
+            entry["resolution"] = f"{img_t.shape[2]}x{img_t.shape[1]}"
+        except Exception:
+            pass
+        manifest.append(entry)
+
+    for ordinal, item in enumerate(videos, 1):
+        entry = {
+            "tag": f"<Video {ordinal}>",
+            "type": "video",
+            "ordinal": ordinal,
+            "input_index": item.input_index,
+        }
+        try:
+            frames, soundtrack, fps = video_stream(item.value)
+            entry["shape"] = list(frames.shape)
+            entry["resolution"] = f"{frames.shape[2]}x{frames.shape[1]}"
+            entry["frame_count"] = frames.shape[0]
+            entry["fps"] = fps
+            entry["duration"] = round(frames.shape[0] / max(1.0, fps), 1)
+            entry["has_audio"] = soundtrack is not None
+        except Exception:
+            pass
+        manifest.append(entry)
+
+    for ordinal, item in enumerate(audios, 1):
+        entry = {
+            "tag": f"<Audio {ordinal}>",
+            "type": "audio",
+            "ordinal": ordinal,
+            "input_index": item.input_index,
+        }
+        try:
+            audio_dict = audio_track(item.value)
+            waveform = audio_dict.get("waveform")
+            sample_rate = int(audio_dict.get("sample_rate") or 32000)
+            if waveform is not None and sample_rate > 0:
+                entry["duration"] = round(float(waveform.shape[-1]) / sample_rate, 2)
+                entry["sample_rate"] = sample_rate
         except Exception:
             pass
         manifest.append(entry)
@@ -1561,7 +1954,7 @@ def _media_manifest(assets: list[MyangMediaAsset]) -> list[dict[str, Any]]:
 def _manifest_text(manifest: list[dict[str, Any]]) -> str:
     if not manifest:
         return "AVAILABLE MEDIA:\n(none)\n"
-    lines = ["AVAILABLE MEDIA (complete whitelist):"]
+    lines = ["AVAILABLE MEDIA (candidate whitelist, NOT a required checklist):"]
     for item in manifest:
         details = []
         if item.get("filename"):
@@ -1589,6 +1982,10 @@ def _manifest_text(manifest: list[dict[str, Any]]) -> str:
     # actually reached the backend, so spell out that they are identifiers -
     # echoing one back would fail the strict media check.
     lines.append("(filename/label 仅用于辨认素材，禁止出现在输出中；引用素材只能逐字使用上面的标签。)")
+    lines.append(
+        "(这里的每一项都只是候选素材：只使用当前镜头确实需要的项；"
+        "不得让未出镜主体进入 subject_definitions，也不得为了凑素材而改写剧情。)"
+    )
     if any(item.get("subject_name") for item in manifest):
         lines.append(
             "(subject_name 是用户为该素材指定的主体名称，可以在正文中直接使用该名称指代人物或物体，"
@@ -1598,11 +1995,26 @@ def _manifest_text(manifest: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _attach_link_metadata(manifest: list[dict[str, Any]], links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for item in manifest:
+        link_index = int(item.get("input_index") or 0) - 1
+        if not 0 <= link_index < len(links):
+            continue
+        link = links[link_index]
+        if link.get("label"):
+            item["label"] = str(link["label"])
+        if link.get("filename"):
+            item["filename"] = str(link["filename"])
+        if link.get("subject"):
+            item["subject_name"] = str(link["subject"])[:40]
+    return manifest
+
+
 def _alias_key(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", str(value or "").strip().lstrip("@").casefold())
 
 
-def _editor_aliases(manifest: list[dict[str, Any]]) -> dict[str, str]:
+def _editor_aliases(manifest: list[dict[str, Any]], links: list[dict[str, Any]]) -> dict[str, str]:
     aliases: dict[str, str] = {}
 
     def put(alias: str, tag: str):
@@ -1614,7 +2026,7 @@ def _editor_aliases(manifest: list[dict[str, Any]]) -> dict[str, str]:
         tag = str(item["tag"])
         kind = str(item["type"])
         ordinal = int(item["ordinal"])
-        slot = int(item.get("slot") or 0)
+        input_index = int(item.get("input_index") or 0)
         bare_tag = tag.strip("<>")
         put(bare_tag, tag)
         put(bare_tag.replace(" ", ""), tag)
@@ -1626,15 +2038,19 @@ def _editor_aliases(manifest: list[dict[str, Any]]) -> dict[str, str]:
         for name in names:
             put(f"{name}{ordinal}", tag)
             put(f"{name} {ordinal}", tag)
-            if slot > 0:
-                put(f"{name}{slot}", tag)
-                put(f"{name} {slot}", tag)
-        if slot > 0:
-            put(f"asset{slot}", tag)
-            put(f"asset {slot}", tag)
+            if input_index > 0:
+                put(f"{name}{input_index}", tag)
+                put(f"{name} {input_index}", tag)
+        if input_index > 0:
+            put(f"media{input_index}", tag)
+            put(f"media {input_index}", tag)
+            put(f"input{input_index}", tag)
+            put(f"input {input_index}", tag)
 
+        link_index = input_index - 1
+        link = links[link_index] if 0 <= link_index < len(links) else {}
         for key in ("label", "filename"):
-            value = str(item.get(key) or "").strip()
+            value = str(link.get(key) or "").strip()
             if not value:
                 continue
             put(value, tag)
@@ -1642,17 +2058,13 @@ def _editor_aliases(manifest: list[dict[str, Any]]) -> dict[str, str]:
     return aliases
 
 
-def _normalize_editor_syntax(text: str, manifest: list[dict[str, Any]]) -> str:
-    aliases = _editor_aliases(manifest)
+def _normalize_editor_syntax(text: str, manifest: list[dict[str, Any]], links: list[dict[str, Any]]) -> str:
+    aliases = _editor_aliases(manifest, links)
 
     def replace_mention(match):
         return aliases.get(_alias_key(match.group(1)), match.group(0))
 
-    normalized = EDITOR_INDEX_RE.sub(
-        lambda match: aliases.get(_alias_key(match.group(1) + match.group(2)), match.group(0)),
-        str(text or ""),
-    )
-    normalized = EDITOR_AT_RE.sub(replace_mention, normalized)
+    normalized = EDITOR_AT_RE.sub(replace_mention, str(text or ""))
     normalized = DIALOGUE_LINE_RE.sub(
         lambda match: f"{match.group(1)}<d>{match.group(2).strip()}</d>",
         normalized,
@@ -1681,6 +2093,8 @@ SHOT_PLANNER_SYSTEM = """你是 MiniMax H3 的分镜规划师。你只做一件�
 规则：
 - 第一个镜头必须从 0 开始，最后一个镜头必须结束在给定的总时长，中间不能有空档或重叠。
 - media 只能填写 AVAILABLE MEDIA 里给出的标签原文；这个镜头不引用素材就填空数组 []。
+- AVAILABLE MEDIA 是候选库，不是必用清单。逐镜只选实际出镜主体或真正生效的场景、动作、声音素材；
+  不要为了使用素材新增主体或剧情，未出镜主体不得写进 subjects，允许 media 为 []。
 - 先把写作器需要的事实聚合完整，但不要写最终英文文案；每个字段必须给出具体内容，不能写“自定”“保持一致”“同上”。
 - composition、subjects、environment_lighting、action_progression、camera、sound_dialogue 分工不同，不能合并成一句剧情摘要。
 - 人物动作必须有可见过程和落点；表情必须有触发和变化；运镜必须说明目标；声音必须绑定到实际动作或说话事件。
@@ -1727,6 +2141,19 @@ def _is_empty_response_error(exc: BaseException) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _is_service_unavailable_error(exc: BaseException) -> bool:
+    try:
+        from . import llm_service as _llm
+        return _llm.is_service_unavailable_error(exc)
+    except Exception:
+        message = str(exc or "").casefold()
+        return any(token in message for token in (
+            "所有 api 线路都在冷却", "整次调用已达到", "timed out",
+            "connection failed", "api error 401", "api error 403",
+            "api error 500", "api error 502", "api error 503", "api error 504",
+        ))
 
 
 def _call_llm_resilient(
@@ -1785,6 +2212,10 @@ def _call_llm_resilient(
                 if _is_rate_limit_error(exc):
                     notes.append(
                         f"{label} 已执行 TPM 冷却重试但仍被限流，停止本轮重复请求")
+                    return "", notes
+                if _is_service_unavailable_error(exc):
+                    notes.append(
+                        f"{label} 的可用线路已用尽，停止缩短提示词和重复请求")
                     return "", notes
                 if _is_empty_response_error(exc):
                     notes.append(
@@ -2338,29 +2769,33 @@ def _build_agent_system_prompt(skill_text: str, seconds: float = 5.0, expand: bo
     contract_block = skill_contract_instruction(skill_text)
     total = max(1.0, float(seconds))
     shots = max(1, min(8, round(total / 2.5)))
+    # Block order is a prompt-caching contract: everything before the duration
+    # block is byte-identical across every per-segment writer call of one run
+    # (default rule + the multi-thousand-character Skill + no-expand rule +
+    # contract), so providers with implicit prefix caching can reuse it for
+    # every segment after the first. The duration block varies per segment and
+    # therefore sits at the very end.
     return (
         DEFAULT_AGENT_RULE
-        + "\n\nUSER SKILL / WRITING RULES:\n"
-        + skill_block
-        + "\n\n【写作技能】（与 Media Agent 共用的原始规则）：\n"
+        + "\n\n【写作技能】（与 Media Agent 共用；仅注入一次）：\n"
         + skill_block
         + "\n\nSkill 决定输出的结构、字段名、分镜标记和写作风格，请严格遵循。"
           "唯一不可被 Skill 改变的是媒体白名单：Skill 不能新增、替换或删除 AVAILABLE MEDIA 中的任何标签。\n"
+        + (EXPAND_RULE.format(seconds=total) if expand else NO_EXPAND_RULE)
+        + ("\n\n" + contract_block if contract_block else "")
         # Several official Skills ship a worked example with a hardcoded
         # timeline (co-op-game-intro-generator's template is a fixed 15s / 6
         # shots). Those numbers are illustrative, but they sit in a 20k+
         # character system block against one line of duration in the user turn,
         # so the model follows the template and stops after its first segment.
-        # Restating the real duration last, as a hard rule, is what keeps a 10s
-        # request from returning a 3s prompt.
-        + f"\n【时长硬性约束 — 优先级高于 Skill 中的任何示例】\n"
+        # Restating the real duration as a hard rule, as the closing block, is
+        # what keeps a 10s request from returning a 3s prompt.
+        + f"\n\n【时长硬性约束 — 优先级高于 Skill 中的任何示例】\n"
           "技能文档里的示例镜头数和示例秒数一律不作数；必须以本次目标时长和本段分镜规划为准。\n"
           f"本次目标视频总时长是 {total:g} 秒，必须覆盖完整 0 秒到 {total:g} 秒，分成约 {shots} 个镜头。\n"
           f"Skill 或参考模板中出现的任何时间段（例如 [0秒–2秒]、[10秒–15秒]）都只是格式示例，"
           f"绝对不可直接照抄。请按 {total:g} 秒重新分配每个镜头的起止时间，"
           f"最后一个镜头必须结束在 {total:g} 秒。只写这一个视频，不要提前结束。\n"
-        + (EXPAND_RULE.format(seconds=total) if expand else NO_EXPAND_RULE)
-        + ("\n\n" + contract_block if contract_block else "")
     )
 
 
@@ -2502,6 +2937,44 @@ def _validate_output(text: str, manifest: list[dict[str, Any]]) -> str:
     return value
 
 
+def _replace_tags_with_runtime_refs(text: str, manifest: list[dict[str, Any]]) -> str:
+    """Compatibility name for the native readable wire format."""
+    del manifest
+    return str(text or "")
+
+
+def _restore_tags_from_runtime_refs(text: str, manifest: list[dict[str, Any]]) -> str:
+    """Decode placeholders from workflows saved by older package versions."""
+    tag_by_input: dict[int, str] = {}
+    for item in manifest or []:
+        if not isinstance(item, dict):
+            continue
+        tag = item.get("tag")
+        index = item.get("input_index")
+        if not isinstance(tag, str) or index is None:
+            continue
+        try:
+            tag_by_input[int(index)] = tag
+        except (TypeError, ValueError):
+            continue
+    if not tag_by_input:
+        return str(text or "")
+    return LEGACY_RUNTIME_REF_RE.sub(
+        lambda match: tag_by_input.get(int(match.group(1)), match.group(0)),
+        str(text or ""),
+    )
+
+
+def _manifest_from_summary(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    basic = data.get("basic_setup")
+    if not isinstance(basic, dict):
+        return []
+    manifest = basic.get("media_manifest")
+    return manifest if isinstance(manifest, list) else []
+
+
 EDITOR_LABELS = {"image": "图片", "video": "视频", "audio": "音频"}
 
 
@@ -2527,12 +3000,14 @@ def _editor_prompt(text: str, manifest: list[dict[str, Any]]) -> str:
         except (TypeError, ValueError):
             continue
 
+    value = _restore_tags_from_runtime_refs(text, manifest)
+
     def replace(match):
         kind = match.group(1).lower()
         kind = "picture" if kind == "image" else kind
         return label_by_tag.get(f"<{kind} {match.group(2)}>", match.group(0))
 
-    return MEDIA_TAG_RE.sub(replace, str(text or ""))
+    return MEDIA_TAG_RE.sub(replace, value)
 
 
 def _expand_with_prompt_assistant(
@@ -2567,8 +3042,8 @@ def _expand_with_prompt_assistant(
             )
         elif _llm.is_rate_limit_error(error):
             advice = (
-                "路由层已尝试其余可用线路；当前所有剩余线路都处于 TPM 冷却。"
-                "本轮不会原地等待或连续轰炸，稍后可直接续学未完成分块。"
+                "路由层已尝试其余可用线路，并最多等待一次短 TPM 冷却；"
+                "若仍失败，本轮会停止，不会继续轰炸或生成整批兜底。"
             )
         else:
             advice = "请在 Agent 技能面板查看各线路状态，修复异常线路后可续学未完成分块。"
@@ -2789,6 +3264,23 @@ AUDIO_SUBJECTS = ("自动", "图片1", "图片2", "图片3", "图片4", "视频1
 _whisper_cache: dict[str, Any] = {}
 
 
+def clear_whisper_cache() -> int:
+    """Release Whisper models which are outside ComfyUI model management."""
+    cached = list(_whisper_cache.values())
+    count = len(cached)
+    _whisper_cache.clear()
+    for model in cached:
+        try:
+            model.to("cpu")
+        except (AttributeError, RuntimeError):
+            pass
+    if count:
+        del cached
+        gc.collect()
+        logger.info("H3-Myang: 已释放 %d 个 Whisper 语音识别模型缓存", count)
+    return count
+
+
 def _transcribe_audio(audio: Any, model_name: str) -> tuple[str, str]:
     """Run Whisper over one connected audio clip.
 
@@ -2856,21 +3348,21 @@ def _transcribe_audio(audio: Any, model_name: str) -> tuple[str, str]:
 
 def _annotate_audio_items(
     manifest: list[dict[str, Any]],
-    assets: list[MyangMediaAsset],
+    items: list[MyangMediaAsset],
     model_name: str,
     subject: str,
 ) -> list[str]:
     """Attach transcripts and subject binding to the audio entries."""
     errors: list[str] = []
-    by_slot = {asset.slot: asset for asset in assets}
+    by_index = {item.input_index: item for item in items}
     for entry in manifest:
         if entry.get("type") != "audio":
             continue
         if subject and subject != "自动":
             entry["subject"] = "纯配乐，无对应人物主体" if subject.startswith("纯配乐") else f"该音频对应 {subject} 中的人物"
-        asset = by_slot.get(entry.get("slot"))
-        if model_name != "off" and asset is not None:
-            text, error = _transcribe_audio(asset.payload, model_name)
+        item = by_index.get(entry.get("input_index"))
+        if model_name != "off" and item is not None:
+            text, error = _transcribe_audio(item.value, model_name)
             if text:
                 entry["transcript"] = text
             if error:
@@ -2936,16 +3428,17 @@ def media_whitelist(media, vlm_service: str = "off", ollama_auto_unload: bool = 
     actually said.  Returns (manifest, errors); errors degrade gracefully so a
     failed description never blocks generation.
     """
-    assets = list(media.assets) if isinstance(media, MyangMediaCatalog) else []
-    if not assets:
+    items = list(getattr(media, "items", ()) or ())
+    if not items:
         return [], []
-    manifest = _media_manifest(assets)
+    manifest = _media_manifest(items)
+    _attach_link_metadata(manifest, list(getattr(media, "links", ()) or []))
     errors: list[str] = []
     if str(vlm_service or "off") != "off":
         errors += _describe_media_items(
-            manifest, assets, str(vlm_service), bool(ollama_auto_unload))
+            manifest, items, str(vlm_service), bool(ollama_auto_unload))
     errors += _annotate_audio_items(
-        manifest, assets, str(whisper_model or "off"), str(audio_subject or "自动"))
+        manifest, items, str(whisper_model or "off"), str(audio_subject or "自动"))
     return manifest, errors
 
 
@@ -2954,25 +3447,20 @@ class MiniMaxH3MediaAgent:
     CATEGORY = "沐阳 H3"
     FUNCTION = "plan"
     RETURN_TYPES = ("STRING", "STRING", "STRING", "MINIMAX_H3_MEDIA", "STRING")
-    RETURN_NAMES = ("agent_prompt", "summary_json", "media_manifest", "media", "myang_prompt")
+    RETURN_NAMES = ("agent_prompt", "summary_json", "media_manifest", "media", "easy_prompt")
     DESCRIPTION = "用 LLM 重写 MiniMax H3 提示词，并严格校验每个素材引用都真实连接。"
 
     @classmethod
     def INPUT_TYPES(cls):
-        # asset_* and asset_manifest_json are transport inputs. The browser
-        # extension fills them in graphToPrompt and strips them from the node
-        # definition, so the media type is always detected from the upstream
-        # slot and never typed by hand. They must be declared as real optional
-        # inputs: ComfyUI only forwards prompt values for required and optional
-        # inputs, and populates "hidden" ones exclusively for its own magic
-        # types (PROMPT, UNIQUE_ID, ...). Declaring asset_manifest_json as hidden
-        # made the backend drop it, leaving the agent with no filenames, no
-        # labels and no media-type hints. asset_manifest_json is the sole metadata
-        # channel: filenames cannot be recovered from a decoded tensor.
-        optional = {"catalog": ("MINIMAX_H3_MEDIA",)}
+        # asset_* and asset_manifest_json are the native browser transport.
+        # The legacy media_* fields remain accepted for saved API/workflow
+        # payloads, but the frontend hides them and emits only the native form.
+        optional = {"catalog": ("MINIMAX_H3_MEDIA",), "media": ("*",)}
         for index in range(1, MAX_ASSETS + 1):
             optional[f"asset_{index}"] = ("*",)
+            optional[f"media_{index}"] = ("*",)
         optional["asset_manifest_json"] = ("STRING", {"default": "[]"})
+        optional["media_links_json"] = ("STRING", {"default": "[]"})
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "dynamicPrompts": True, "default": ""}),
@@ -3009,27 +3497,54 @@ class MiniMaxH3MediaAgent:
         for index in range(1, MAX_ASSETS + 1):
             value = kwargs.get(f"asset_{index}")
             if value is None:
+                value = kwargs.get(f"media_{index}")
+            if value is None:
                 continue
             media_state.append((index, classify_payload(value), id(value)))
-        return hashlib.sha256(repr((seed, seconds, prompt_hash, skill_hash, kwargs.get("skill_preset"), kwargs.get("vlm_service"), kwargs.get("asset_manifest_json"), kwargs.get("扩写"), kwargs.get("对话修正"), kwargs.get("音频识别"), kwargs.get("音频主体"), media_state)).encode()).hexdigest()
+        return hashlib.sha256(repr((seed, seconds, prompt_hash, skill_hash, kwargs.get("skill_preset"), kwargs.get("vlm_service"), kwargs.get("asset_manifest_json"), kwargs.get("media_links_json"), kwargs.get("扩写"), kwargs.get("对话修正"), kwargs.get("音频识别"), kwargs.get("音频主体"), media_state)).encode()).hexdigest()
 
     @staticmethod
-    def _collect_media(kwargs: dict, metadata: dict[int, dict[str, Any]] | None = None) -> list[MyangMediaAsset]:
-        assets: list[MyangMediaAsset] = []
+    def _collect_media(
+        kwargs: dict,
+        media_links: list[dict[str, Any]] | None = None,
+        metadata: dict[int, dict[str, Any]] | None = None,
+    ) -> list[MyangMediaAsset]:
         catalog = kwargs.get("catalog")
-        if isinstance(catalog, MyangMediaCatalog):
-            assets.extend(catalog.assets)
-        occupied = {asset.slot for asset in assets}
+        items: list[MyangMediaAsset] = (
+            list(catalog.items) if isinstance(catalog, MyangMediaCatalog) else [])
+        direct = kwargs.get("media")
+        if direct is not None and not items:
+            items.append(MyangMediaAsset(0, classify_payload(direct), direct))
+        occupied = {int(item.input_index) for item in items}
         for index in range(1, MAX_ASSETS + 1):
             value = kwargs.get(f"asset_{index}")
             if value is None:
+                value = kwargs.get(f"media_{index}")
+            if value is None:
                 continue
+            # The only type hint is the one the frontend derived from the
+            # upstream slot; classify_payload falls back to the payload shape.
+            hint = ""
+            if media_links:
+                link_index = index - 1
+                if 0 <= link_index < len(media_links):
+                    hint = str(media_links[link_index].get("media_type") or "").strip().lower()
+            record = (metadata or {}).get(index) or {}
             slot = index
             while slot in occupied:
                 slot += MAX_ASSETS
-            assets.append(asset_from_input(slot, value, (metadata or {}).get(index)))
+            resolved_type = classify_payload(
+                value, hint=str(record.get("media_type") or hint))
+            items.append(MyangMediaAsset(
+                slot,
+                resolved_type,
+                value,
+                filename=str(record.get("filename") or ""),
+                label=str(record.get("label") or ""),
+                origin=str(record.get("source_id") or ""),
+            ))
             occupied.add(slot)
-        return assets
+        return items
 
     @classmethod
     def plan(
@@ -3049,13 +3564,31 @@ class MiniMaxH3MediaAgent:
         expand = bool(kwargs.get("扩写", True))
         dialogue_check = bool(kwargs.get("对话修正", True))
         asset_manifest_json = str(kwargs.get("asset_manifest_json") or "[]")
+        media_links_json = str(kwargs.get("media_links_json") or "[]")
         metadata = parse_asset_manifest(asset_manifest_json)
-        assets = cls._collect_media(kwargs, metadata=metadata)
-        manifest = _media_manifest(assets)
+        media_links = (
+            parse_media_links(asset_manifest_json)
+            if metadata else parse_media_links(media_links_json))
+        items = cls._collect_media(
+            kwargs, media_links=media_links, metadata=metadata)
+        manifest = _media_manifest(items)
         # Hand the resolved media straight to Myang conditioning so both ends agree
         # on the ordering the <Picture n> tags were written against.
-        media_bundle = MyangMediaCatalog(tuple(assets))
-        original_prompt = _normalize_editor_syntax(str(prompt or ""), manifest)
+        media_bundle = MyangMediaCatalog(items=tuple(items), links=tuple(media_links))
+        # Attach filename/label metadata so the whitelist shows real names and
+        # the LLM can ground references in the actual source material.
+        _attach_link_metadata(manifest, media_links)
+        original_prompt = _restore_tags_from_runtime_refs(
+            _normalize_editor_syntax(str(prompt or ""), manifest, media_links),
+            manifest,
+        )
+
+        # Unresolved markers can only come from an old saved workflow. Readable
+        # legacy references were decoded above; disconnected ones still fail
+        # loudly instead of silently pointing at the wrong asset.
+        unresolved_refs = re.findall(r"__MINIMAX_H3_UNRESOLVED_REF_[^_]+__", original_prompt)
+        if unresolved_refs:
+            raise ValueError("Prompt contains a disconnected media reference. Reconnect the media or remove the @ reference.")
 
         if not agent_enabled:
             checked_prompt = _validate_output(original_prompt, manifest) if strict_media_check else _sanitize_llm_output(original_prompt)
@@ -3065,9 +3598,9 @@ class MiniMaxH3MediaAgent:
                 # Broadcast the editor-syntax prompt so downstream Myang nodes
                 # can render it with media chips. ComfyUI sends "executed" for
                 # any node that returns a ui payload, not just output nodes.
-                "ui": {"myang_prompt": [editor_prompt]},
+                "ui": {"easy_prompt": [editor_prompt]},
                 "result": (
-                    checked_prompt,
+                    _replace_tags_with_runtime_refs(checked_prompt, manifest),
                     summary_json,
                     json.dumps(manifest, ensure_ascii=False, indent=2),
                     media_bundle,
@@ -3173,7 +3706,7 @@ class MiniMaxH3MediaAgent:
             # the missing shots" of the user's raw prompt would just burn two
             # more doomed calls.
             coverage_notes = ["改写已失败，跳过分镜补全"]
-        generated = _normalize_editor_syntax(generated, manifest)
+        generated = _normalize_editor_syntax(generated, manifest, media_links)
         # Dialogue sub-agent: a deterministic audit first (language + whether the
         # line can physically be spoken in its shot), then one repair call only
         # if that audit found something.
@@ -3190,7 +3723,7 @@ class MiniMaxH3MediaAgent:
                 generated, dialogue_notes = _fix_dialogue_via_agent(
                     generated, dialogue_report, seconds, str(llm_service), bool(ollama_auto_unload), int(seed)
                 )
-                generated = _normalize_editor_syntax(generated, manifest)
+                generated = _normalize_editor_syntax(generated, manifest, media_links)
         final_skill_issues = skill_output_issues(generated, skill_content)
         if final_skill_issues:
             raise ValueError(
@@ -3198,6 +3731,7 @@ class MiniMaxH3MediaAgent:
                 + "；".join(final_skill_issues))
         if strict_media_check:
             generated = _validate_output(generated, manifest)
+        generated_for_wire = _replace_tags_with_runtime_refs(generated, manifest)
         # Final sub-agent: it only ever sees the finished prompt (plus the plan
         # it was written against), so the storyboard follows the real shot
         # breakdown instead of regex sentence-splitting, and it cannot alter the
@@ -3226,13 +3760,14 @@ class MiniMaxH3MediaAgent:
             "dialogue_report": dialogue_audit.report_text(dialogue_report) if dialogue_report else "未开启对话修正",
             "dialogue_notes": dialogue_notes,
             "media": manifest,
-            "asset_catalog": manifest,
+            "media_links": media_links,
+            "wire_format": "readable_media_tags",
         }
         editor_prompt = _editor_prompt(generated, manifest)
         return {
-            "ui": {"myang_prompt": [editor_prompt]},
+            "ui": {"easy_prompt": [editor_prompt]},
             "result": (
-                generated,
+                generated_for_wire,
                 summary_json,
                 json.dumps(manifest_report, ensure_ascii=False, indent=2),
                 media_bundle,
@@ -3289,7 +3824,7 @@ class MiniMaxH3Viewer:
             "optional": {
                 "agent_prompt": ("STRING", {"multiline": True, "dynamicPrompts": False, "default": "", "forceInput": True}),
                 "summary_json": ("STRING", {"multiline": True, "dynamicPrompts": False, "default": "", "forceInput": True}),
-                "myang_prompt": ("STRING", {"multiline": True, "dynamicPrompts": False, "default": "", "forceInput": True}),
+                "easy_prompt": ("STRING", {"multiline": True, "dynamicPrompts": False, "default": "", "forceInput": True}),
             }
         }
 
@@ -3301,10 +3836,10 @@ class MiniMaxH3Viewer:
         # the previous run's text.
         return float("nan")
 
-    def view(self, text: str = "", agent_prompt: str = "", summary_json: str = "", myang_prompt: str = ""):
+    def view(self, text: str = "", agent_prompt: str = "", summary_json: str = "", easy_prompt: str = ""):
         raw_prompt = str(agent_prompt or "").strip()
         raw_summary = str(summary_json or "").strip()
-        raw_myang = str(myang_prompt or "").strip()
+        raw_easy = str(easy_prompt or "").strip()
 
         data = {}
         if raw_summary:
@@ -3313,7 +3848,9 @@ class MiniMaxH3Viewer:
             except (json.JSONDecodeError, TypeError):
                 data = {}
 
-        display_prompt = raw_prompt
+        # Decode placeholders from older workflows; new outputs already use
+        # readable media tags and pass through unchanged.
+        display_prompt = _restore_tags_from_runtime_refs(raw_prompt, _manifest_from_summary(data))
 
         sections = []
 
@@ -3325,13 +3862,13 @@ class MiniMaxH3Viewer:
                 f"{display_prompt}"
             )
 
-        if raw_myang:
+        if raw_easy:
             sections.append(
                 "=========================================\n"
                 " 【第 2 页】✏️ 沐阳编辑提示词\n"
                 " @图片1 / @视频1 / @音频1 可直接接入沐阳 H3 节点\n"
                 "=========================================\n"
-                f"{raw_myang}"
+                f"{raw_easy}"
             )
 
         if raw_summary:

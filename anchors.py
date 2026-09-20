@@ -2,10 +2,6 @@
 
 SPDX-License-Identifier: GPL-3.0-only
 
-Copyright (C) 2026 NikoDemon80
-Copyright (C) 2026 Myang
-Modified by Myang on 2026-08-26.
-
 Portions of the layout/payload, temporal-latent and synchronized-trim logic
 are adapted from NikoDemon80/ComfyUI-H3-Motion-Context (GPL-3.0).  Myang's
 changes add arbitrary-position anchors, marker-gated composition, seam
@@ -71,6 +67,12 @@ def steps_for_frames(frame_count):
         if covered >= int(frame_count):
             return steps if covered == int(frame_count) else None
     return None
+
+
+def tail_seed_step(frame_count):
+    """A tail latent can be hard-seeded only at a matching VAE phase."""
+    step = steps_for_frames(frame_count)
+    return step if step is not None and step % len(FRAME_PER_TOKEN) == 0 else None
 
 
 def streams(latent):
@@ -158,28 +160,27 @@ def _move_audio_anchor(layout, refs):
               if AUDIO_END_FRAME in ref]
     if not marked:
         return
-    if len(marked) != 1:
-        raise RuntimeError("H3-Myang: 一次续接只能有一个声音锚点")
-    index = marked[0]
-    ref = refs[index]
-    if ref.get("kind") != "audio":
-        raise RuntimeError("H3-Myang: 声音时间标记只能用于 audio reference")
-    audio_t = int(ref.get("ref_audio_t", 0))
-    if audio_t <= 0:
-        return
-    segment = _ref_segment_map(layout, refs).get(index, {}).get("ref_audio")
-    if segment is None:
-        raise RuntimeError("H3-Myang: 标记的声音参考没有产生 ref_audio 段")
-    start, stop = segment
-    if stop - start != audio_t * 2:
-        raise RuntimeError(
-            "H3-Myang: %d 个声音 step 应占 %d 行，实际 %d" %
-            (audio_t, audio_t * 2, stop - start))
-    current_start = float(layout.position_ids[start, 0])
-    desired_end = (target_origin(layout)
-                   + FRAME_RESCALE * float(ref[AUDIO_END_FRAME]))
-    desired_start = desired_end - float(audio_t)
-    layout.position_ids[start:stop, 0] += desired_start - current_start
+    segment_map = _ref_segment_map(layout, refs)
+    origin = target_origin(layout)
+    for index in marked:
+        ref = refs[index]
+        if ref.get("kind") != "audio":
+            raise RuntimeError("H3-Myang: 声音时间标记只能用于 audio reference")
+        audio_t = int(ref.get("ref_audio_t", 0))
+        if audio_t <= 0:
+            continue
+        segment = segment_map.get(index, {}).get("ref_audio")
+        if segment is None:
+            raise RuntimeError("H3-Myang: 标记的声音参考没有产生 ref_audio 段")
+        start, stop = segment
+        if stop - start != audio_t * 2:
+            raise RuntimeError(
+                "H3-Myang: %d 个声音 step 应占 %d 行，实际 %d" %
+                (audio_t, audio_t * 2, stop - start))
+        current_start = float(layout.position_ids[start, 0])
+        desired_end = origin + FRAME_RESCALE * float(ref[AUDIO_END_FRAME])
+        desired_start = desired_end - float(audio_t)
+        layout.position_ids[start:stop, 0] += desired_start - current_start
 
 
 def _call_stock_layout(stock, obj, text_len, latent_t, latent_h, latent_w, audio_t,
@@ -252,9 +253,43 @@ def _patched_layout(self, text_len, latent_t, latent_h, latent_w, audio_t,
             self.position_ids[start:stop, 0] = coordinate
 
     _move_audio_anchor(self, refs)
+    _attach_reference_value_scales(self, refs)
 
 
 setattr(_patched_layout, LAYOUT_PATCH, True)
+
+
+def _attach_reference_value_scales(layout, refs):
+    """Record which packed rows belong to a weighted reference block.
+
+    ``H3Condition`` writes ``reference_weight`` onto each official ref block.
+    The attention forwards in ``progress.py`` scale the Value rows of those
+    packed segments, but they only know token ranges, not ref blocks.  Resolve
+    the ranges here, once per layout, in packing order (a video's audio rows
+    precede its visual rows).  Unit weights are skipped so a default graph
+    leaves the attention path untouched.
+    """
+    scales = []
+    weighted = [
+        (index, float(ref.get("reference_weight")))
+        for index, ref in enumerate(refs or ())
+        if isinstance(ref, dict) and ref.get("reference_weight") is not None
+        and abs(float(ref.get("reference_weight")) - 1.0) > 1e-9]
+    if weighted:
+        try:
+            segment_map = _ref_segment_map(layout, refs)
+            for index, weight in weighted:
+                segments = segment_map.get(index, {})
+                for kind in _expected_ref_segments(refs[index]):
+                    span = segments.get(kind)
+                    if span is not None:
+                        scales.append((int(span[0]), int(span[1]), weight))
+        except RuntimeError as error:
+            logger.warning(
+                "H3-Myang: 无法定位参考素材的 token 区间，参考权重本次不生效：%s",
+                error)
+            scales = []
+    layout.reference_value_scales = tuple(scales)
 
 
 def _patched_payload(self, **kwargs):
@@ -546,6 +581,61 @@ def _masked_anchor_latent(latent, blocks):
     return output
 
 
+def _masked_tail_anchor_latent(latent, blocks, start_step=None):
+    """Seed a hidden future window at the target tail without disturbing a head mask."""
+    import comfy.nested_tensor
+
+    parts = streams(latent)
+    if not parts:
+        raise ValueError("H3-Myang: 目标 H3 latent 没有画面流")
+    target_video = video_stream(latent).clone()
+    overlap_steps = len(blocks)
+    total_steps = int(target_video.shape[2])
+    if overlap_steps <= 0 or overlap_steps >= total_steps:
+        raise ValueError(
+            "H3-Myang: 尾部锚点 latent 步数 %d 无法写入目标 %d 步" %
+            (overlap_steps, total_steps))
+    start = total_steps - overlap_steps if start_step is None else int(start_step)
+    if start < 0 or start + overlap_steps > total_steps:
+        raise ValueError(
+            "H3-Myang: 尾部锚点 step 范围 %d..%d 超出目标 0..%d" %
+            (start, start + overlap_steps - 1, total_steps - 1))
+    for index, block in enumerate(blocks):
+        value = block.to(device=target_video.device, dtype=target_video.dtype)
+        if int(value.shape[0]) != int(target_video.shape[0]):
+            value = value[:1].expand(target_video.shape[0], -1, -1, -1, -1)
+        target_video[:, :, start + index:start + index + 1] = value
+
+    seeded_parts = [target_video]
+    for part in parts[1:]:
+        seeded_parts.append(part.unsqueeze(0) if part.ndim == 3 else part)
+    raw_masks = latent.get("noise_mask")
+    if raw_masks is not None:
+        masks = list(raw_masks.unbind()) if hasattr(raw_masks, "unbind") else list(raw_masks)
+        video_mask = masks[0].clone()
+        if video_mask.ndim == 4:
+            video_mask = video_mask.unsqueeze(0)
+    else:
+        video_mask = torch.ones(
+            (target_video.shape[0], 1, target_video.shape[2], 1, 1),
+            device=target_video.device, dtype=torch.float32)
+        masks = []
+    video_mask[:, :, start:start + overlap_steps] = 0.0
+    output_masks = [video_mask]
+    for index, part in enumerate(seeded_parts[1:], 1):
+        if index < len(masks):
+            mask = masks[index]
+            output_masks.append(mask.unsqueeze(0) if mask.ndim == part.ndim - 1 else mask)
+        else:
+            output_masks.append(torch.ones(
+                (part.shape[0], 1, *part.shape[2:]),
+                device=part.device, dtype=torch.float32))
+    output = dict(latent)
+    output["samples"] = comfy.nested_tensor.NestedTensor(tuple(seeded_parts))
+    output["noise_mask"] = comfy.nested_tensor.NestedTensor(tuple(output_masks))
+    return output
+
+
 
 
 class H3AnchorContext:
@@ -650,6 +740,151 @@ class H3AnchorContext:
         return (output, trim, masked_latent)
 
 
+class H3LatentOverlapSeed:
+    """Copy a previous high-resolution tail without adding condition tokens.
+
+    Pass 1 needs explicit MiniMax keyframe conditioning to establish the shot
+    continuation.  Pass 2 already receives that established shot as its input
+    latent, so registering the same high-resolution tail as keyframes again is
+    redundant and increases the packed attention sequence from segment 2 on.
+    The zero-noise overlap is sufficient here: it preserves the exact tail and
+    lets temporal attention carry it into only the newly denoised frames.
+    """
+
+    CATEGORY = "沐阳 H3/内部"
+    FUNCTION = "apply"
+    RETURN_TYPES = ("INT", "LATENT")
+    RETURN_NAMES = ("trim_frames", "masked_latent")
+    DESCRIPTION = "内部二采承接：只写入上一段尾部 latent，不重复增加高分辨率条件 token。"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "latent": ("LATENT",),
+            "context_latent": ("LATENT",),
+            "context_length": (CONTEXT_LENGTHS, {"default": "22"}),
+        }}
+
+    def apply(self, latent, context_latent, context_length):
+        trim = int(context_length)
+        target_video = video_stream(latent)
+        source_video = video_stream(context_latent)
+        target_size = (int(target_video.shape[4]) * 16,
+                       int(target_video.shape[3]) * 16)
+        source_size = (int(source_video.shape[4]) * 16,
+                       int(source_video.shape[3]) * 16)
+        if source_size != target_size:
+            raise ValueError(
+                "H3-Myang: 上一段与新段二采分辨率不同，latent 不能直接续接")
+
+        target_frames = pixel_frames(int(target_video.shape[2]))
+        blocks, _positions, trim = _latent_blocks(context_latent, trim)
+        if trim >= target_frames:
+            raise ValueError(
+                "H3-Myang: 二采重叠区占用 %d 帧，目标段只有 %d 帧" %
+                (trim, target_frames))
+        masked_latent = _masked_anchor_latent(latent, blocks)
+        logger.info(
+            "H3-Myang: 二采 latent 尾部写入 %d 步 / %d 帧 | "
+            "重叠区零噪声，不重复添加高分辨率条件 token",
+            len(blocks), trim)
+        return (trim, masked_latent)
+
+
+class H3TailAnchorContext:
+    CATEGORY = "沐阳 H3/导演台/内部"
+    FUNCTION = "apply"
+    RETURN_TYPES = ("CONDITIONING", "INT", "LATENT")
+    RETURN_NAMES = ("conditioning", "trim_tail_frames", "masked_latent")
+    DESCRIPTION = (
+        "把时间轴出点之后的 MotionContext 窗口钉在隐藏生成尾部；"
+        "采样后裁掉该窗口，使生成段自然接入后续素材。")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "vae": ("VAE",),
+                "latent": ("LATENT",),
+                "context_frames": ("IMAGE",),
+                "context_length": (CONTEXT_LENGTHS, {"default": "22"}),
+                "anchor_start_frame": ("INT", {
+                    "default": 0, "min": 0, "max": 8192,
+                    "tooltip": "0=紧贴目标尾部；导演台会传入生成可见区间结束帧"}),
+            },
+            "optional": {
+                "context_audio": ("AUDIO",),
+                "audio_vae": ("VAE",),
+            },
+        }
+
+    def apply(self, conditioning, vae, latent, context_frames, context_length,
+              anchor_start_frame=0,
+              context_audio=None, audio_vae=None):
+        from .anchor_compat import ensure_anchors
+        ensure_anchors()
+
+        trim = int(context_length)
+        target_video = video_stream(latent)
+        target_frames = pixel_frames(int(target_video.shape[2]))
+        width = int(target_video.shape[4]) * 16
+        height = int(target_video.shape[3]) * 16
+        blocks, offsets, trim = _pixel_blocks(
+            vae, context_frames, trim, width, height)
+        if trim >= target_frames:
+            raise ValueError(
+                "H3-Myang: 尾部锚点占用 %d 帧，目标段只有 %d 帧" %
+                (trim, target_frames))
+        requested_start = int(anchor_start_frame)
+        start_frame = requested_start if requested_start > 0 else target_frames - trim
+        if start_frame + trim > target_frames:
+            raise ValueError(
+                "H3-Myang: 尾部 MotionContext 起点 %d 不能在 %d 帧目标中容纳 %d 帧" %
+                (start_frame, target_frames, trim))
+        keyframes = [
+            {"resolved_frame_index": 0,
+             ANCHOR_FRAME: start_frame + offsets[index],
+             ANCHOR_TOTAL: target_frames,
+             "latent": blocks[index]}
+            for index in range(len(blocks))
+        ]
+        output = node_helpers.conditioning_set_values(
+            conditioning, {"minimax_keyframes": keyframes}, append=True)
+        output = node_helpers.conditioning_set_values(
+            output, {"minimax_frame_count": target_frames})
+        if context_audio is not None:
+            if audio_vae is None:
+                raise ValueError(
+                    "H3-Myang: 尾部 context_audio 已连接，但没有连接 audio_vae")
+            audio_ref = _encoded_audio_ref(audio_vae, context_audio, trim)
+            # FRAME_RESCALE converts a video-frame coordinate to the same
+            # 40Hz timeline used by audio tokens.  Ending at target_frames
+            # therefore pins this window to the hidden generated tail.
+            audio_ref[AUDIO_END_FRAME] = float(start_frame + trim)
+            output = node_helpers.conditioning_set_values(
+                output, {"minimax_refs": [audio_ref]}, append=True)
+        # Arbitrary-position conditioning works at every video frame, but a
+        # VAE latent hard copy is safe only on the recurring 5-step temporal
+        # phase.  Most exact I/O boundaries are deliberately off that phase.
+        # Keep the full MotionContext keyframes there and skip only the unsafe
+        # latent write; this avoids a hard error and protects visible frames.
+        start_step = tail_seed_step(start_frame)
+        if start_step is None:
+            masked_latent = latent
+            seed_note = "任意帧条件锚点（尾 latent 不硬写入）"
+        else:
+            masked_latent = _masked_tail_anchor_latent(latent, blocks, start_step)
+            seed_note = "条件锚点 + 尾 latent 零噪声"
+        hidden_tail = target_frames - start_frame
+        logger.info(
+            "H3-Myang: 时间轴尾部 MotionContext 全钉 %d 步 @帧%s | %s | "
+            "隐藏尾窗 %d 帧，采样后裁除",
+            len(blocks), [start_frame + value for value in offsets],
+            seed_note, hidden_tail)
+        return output, hidden_tail, masked_latent
+
+
 class H3AnchorKeyframe:
     CATEGORY = "沐阳 H3"
     FUNCTION = "apply"
@@ -717,16 +952,20 @@ class H3AnchorTrim:
                 "audio": ("AUDIO",),
                 "fps": ("FLOAT", {
                     "default": 24.0, "min": 1.0, "max": 240.0}),
+                "tail_trim_frames": ("INT", {
+                    "default": 0, "min": 0, "max": 4096}),
             },
         }
 
-    def trim(self, images, trim_frames, audio=None, fps=24.0):
+    def trim(self, images, trim_frames, audio=None, fps=24.0, tail_trim_frames=0):
         trim = max(0, int(trim_frames))
+        tail = max(0, int(tail_trim_frames))
         total = int(images.shape[0])
-        if trim >= total:
+        if trim + tail >= total:
             raise ValueError(
-                "H3-Myang: 不能从 %d 帧里裁掉 %d 帧" % (total, trim))
-        images = images[trim:]
+                "H3-Myang: 不能从 %d 帧里裁掉头部 %d 帧和尾部 %d 帧" %
+                (total, trim, tail))
+        images = images[trim:total - tail if tail else total]
         if audio is None:
             return (images, None)
         waveform = audio["waveform"]
@@ -747,11 +986,15 @@ class H3AnchorTrim:
 
 NODE_CLASS_MAPPINGS = {
     "H3AnchorContext": H3AnchorContext,
+    "H3LatentOverlapSeed": H3LatentOverlapSeed,
+    "H3TailAnchorContext": H3TailAnchorContext,
     "H3AnchorKeyframe": H3AnchorKeyframe,
     "H3AnchorTrim": H3AnchorTrim,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3AnchorContext": "沐阳 H3 · 段间多关键帧",
+    "H3LatentOverlapSeed": "沐阳 H3 · 二采重叠写入（内部）",
+    "H3TailAnchorContext": "沐阳 H3 · 时间轴尾部桥接（内部）",
     "H3AnchorKeyframe": "沐阳 H3 · 任意位置关键帧",
     "H3AnchorTrim": "沐阳 H3 · 锚点同步裁剪",
 }

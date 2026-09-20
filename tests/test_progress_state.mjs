@@ -51,4 +51,32 @@ check(!progress.applyProgressEvent(otherRun, {
     run_id: "run-b", segment_index: 1, total_segments: 1, stage: "done",
 }), "a stale run was allowed to update current progress");
 
+const enhanced = progress.createProgressState({
+    runId: "run-enhanced", total: 1, refining: true,
+    motionRepair: true, faceRefine: true,
+});
+let enhancedPercent = 0;
+for (const event of [
+    {stage: "sampled"},
+    {stage: "motion_start"},
+    {stage: "sampling", pass_label: "motion", step: 3, step_total: 6},
+    {stage: "motion_refined"},
+    {stage: "refine_start"},
+    {stage: "sampling", pass_label: "sample2", step: 2, step_total: 4},
+    {stage: "refined"},
+    {stage: "face_start"},
+    {stage: "sampling", pass_label: "face", step: 3, step_total: 4},
+    {stage: "face_refined"},
+    {stage: "done"},
+]) {
+    check(progress.applyProgressEvent(enhanced, {
+        run_id: "run-enhanced", total_segments: 1, segment_index: 1, ...event,
+    }), `enhancement stage was rejected: ${event.stage}`);
+    const current = progress.progressPercent(enhanced);
+    check(current >= enhancedPercent, "enhancement progress moved backwards");
+    enhancedPercent = current;
+}
+check(enhanced.phase === "assembling",
+    "enhanced final segment did not enter real assembly stage");
+
 console.log("PASS monotonic out-of-order progress and assembly stages");

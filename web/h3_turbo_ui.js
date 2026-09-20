@@ -8,16 +8,26 @@ const PROFILE_8 = "LightX2V v1.0 · 8步（12/3·通用）";
 const PROFILE_4_768 = "LightX2V v1.0 · 4步768P（6/3）";
 const PROFILE_4 = "LightX2V v0.1 · 4步（12/3）";
 const PROFILE_REF_4 = "LightX2V Ref2VA v0.1 · 4步（12/3）";
+const SPEED_CACHE_OFF = "关闭";
 
 const LABELS = {
     profile: "LightX2V 官方档位",
-    speed_cache: "加速缓存",
     shift_video: "自定义视频 Shift",
     shift_audio: "自定义音频 Shift",
     recommended_steps: "手动推荐步数",
     "LoRA文件": "Turbo LoRA 文件",
     "LoRA强度": "LoRA 模型强度",
     "手动覆盖Shift": "手动覆盖官方 Shift",
+    "附加LoRA开启": "叠加其他效果 LoRA（最多 3 个）",
+    "附加LoRA1启用": "启用附加 LoRA 1",
+    "附加LoRA1文件": "附加 LoRA 1 文件",
+    "附加LoRA1强度": "附加 LoRA 1 强度",
+    "附加LoRA2启用": "启用附加 LoRA 2",
+    "附加LoRA2文件": "附加 LoRA 2 文件",
+    "附加LoRA2强度": "附加 LoRA 2 强度",
+    "附加LoRA3启用": "启用附加 LoRA 3",
+    "附加LoRA3文件": "附加 LoRA 3 文件",
+    "附加LoRA3强度": "附加 LoRA 3 强度",
 };
 
 function inferredProfile(by) {
@@ -128,6 +138,12 @@ function refresh(node) {
         if (LABELS[item.name]) item.label = LABELS[item.name];
     }
     const manual = String(by.profile?.value || "") === MANUAL;
+    // Legacy positional placeholder.  TE-Speed/Spectrum used to be mounted
+    // dynamically by this node; the runtime integration has been removed.
+    if (by.speed_cache) {
+        by.speed_cache.value = SPEED_CACHE_OFF;
+        hide(by.speed_cache);
+    }
     const official = manual ? null : officialShift(by);
     const override = manual || by["手动覆盖Shift"]?.value === true;
     if (!override && official) {
@@ -140,6 +156,16 @@ function refresh(node) {
     visible(by.recommended_steps, manual);
     const loadsHere = String(by["LoRA文件"]?.value || EXTERNAL) !== EXTERNAL;
     visible(by["LoRA强度"], loadsHere);
+    const additional = by["附加LoRA开启"]?.value === true;
+    for (let index = 1; index <= 3; index++) {
+        const enabled = by[`附加LoRA${index}启用`];
+        const file = by[`附加LoRA${index}文件`];
+        const strength = by[`附加LoRA${index}强度`];
+        visible(enabled, additional);
+        const slotActive = additional && enabled?.value === true;
+        visible(file, slotActive);
+        visible(strength, slotActive && String(file?.value || "不使用") !== "不使用");
+    }
     const modelInput = (node.inputs || []).find((input) => input.name === "model");
     if (modelInput) modelInput.label = "基础模型 / 上游已挂 LoRA 模型";
     const outputLabels = {

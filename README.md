@@ -67,6 +67,20 @@ The core package declares no additional Python packages beyond the standard Comf
 Install `openai-whisper` only when you select local Whisper transcription in the Media Agent. The
 NVIDIA RTX VSR path requires a separately installed NVIDIA VFX runtime.
 
+### Optional enhancement packs
+
+Two Director switches load third-party custom-node packs only when they are turned on. With the
+switches off, the core Director, native continuity, second pass, and audio chain never import them.
+
+- **角色五视图 / 动作修复** use [ComfyUI-MAINodes](https://github.com/AIMixer/ComfyUI-MAINodes)
+  (`H3ContactSheet`, `H3ContactSheetDecode`, `H3JerkOracle`, `H3TimeSmear`, `H3InjectSchedule`,
+  `H3ExactRecover`, `H3AudioRecover`) plus the five-view LoRA.
+- **小脸精修** uses [ComfyUI-H3-FaceRefine](https://github.com/AIMixer/ComfyUI-H3-FaceRefine)
+  (`H3FaceTrackCrop`, `H3InjectVideoLatent`, `H3PerFrameDenoise`, `H3FaceStitch`) and a face
+  detector model. The long-video node checks for the nodes and the detector before sampling.
+
+The regression tests that exercise those packs report `SKIP` when the packs are not installed.
+
 ## Quick start
 
 Start with:
@@ -191,9 +205,11 @@ The upstream project may publish additional checkpoints. In v0.1.0, the upstream
 Use only a preset listed above unless you have independently validated a manual shift, or wait for a
 package update that adds the checkpoint explicitly.
 
-The Turbo node also exposes optional TE-Speed and Spectrum cache modes. They require separately
-installed sibling custom-node packages; when one is unavailable, Myang warns and continues with that
-cache disabled.
+The Turbo node keeps a legacy `speed_cache` widget so older workflows still validate, but the
+built-in TE-Speed and Spectrum mounts are disabled: both retained opaque cache/history state and
+were unsafe to compose with the current H3 attention and memory patch chain. A saved value other
+than `关闭` is ignored with a log line. After the official Turbo LoRA the node can stack up to three
+ordinary H3 effect LoRAs without changing the official schedule.
 
 Preset sources:
 [LightX2V model page](https://huggingface.co/lightx2v/Minimax-h3-Turbo) and
@@ -207,9 +223,20 @@ The Director and `沐阳 H3 · 二采放大设置` provide three modes:
 - second pass at the same resolution;
 - upscale only, with no second pass.
 
-Available paths include pixel/VAE, bislerp latent, neural 3D latent, and NVIDIA RTX VSR. Long videos are
-processed one segment at a time. Final audio comes directly from the first pass and receives only seam
-handling and duration trimming. Use a Ref2VA base model without a Turbo LoRA for the second pass.
+Available paths are pixel/VAE projection, neural 3D latent, and NVIDIA RTX VSR. The former bislerp
+latent option was removed from the second-pass menu: on H3's temporally compressed latent it blends
+cells that decode into different motion states and ghosts, and its documented cure (a VAE decode →
+encode projection) is the pixel path. It remains reachable on `沐阳 H3 · Latent 直接放大` with `vae`
+unwired. Long videos are processed one segment at a time. Final audio comes directly from the first
+pass and receives only seam handling and duration trimming. Use a Ref2VA base model without a Turbo
+LoRA for the second pass; the Director refuses a Turbo output on the `二采模型` socket.
+
+The second pass reuses the first pass's conditioning by default (`复用文本/素材条件`). Rebuilding it
+at the second-pass canvas re-fits every reference image to the larger area and changes the reference
+token layout the low-denoise pass is asked to converge to, which shows up as smearing and slight
+identity drift. The memory profile block controls how much VRAM the pass keeps free and how often
+clear step previews decode; on 16 GB Windows cards the automatic profile evicts pass-1, VAE and
+upscaler residency before the pass-2 model loads and retries once with pages evicted after a real OOM.
 
 The neural 3D path accepts LBH-123-AI's 24-channel H3 Latent Upscaler weights. Download the checkpoint
 separately and place it in:
@@ -221,8 +248,9 @@ ComfyUI/models/latent_upscale_models/
 Weights and documentation:
 [LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)
 
-Start with `fp16` and a temporal chunk of `16`. Try `8` when memory is tight, or `fp32` if the result
-shows precision artifacts or color blocks.
+Start with `fp16` and temporal chunk `0` (one full-context pass, no seams). Raise the chunk to `16` or
+`8` only when memory is tight; chunk boundaries are cross-faded rather than butt-joined. Try `fp32` if
+the result shows precision artifacts or color blocks.
 
 ## Main nodes
 
@@ -248,8 +276,9 @@ Nodes marked `内部` are managed by the Director or long-video expansion and no
 
 ## Compatibility and limitations
 
-- CPU structural regression tests cover the H3 layouts in ComfyUI `v0.33.2` and `v0.34.0`. After a
-  ComfyUI update, validate a two-segment render before starting a long job.
+- CPU structural regression tests cover the H3 layouts in ComfyUI `v0.33.2` and `v0.34.0`, and the
+  package is exercised against `v0.33.2` (`7cee3ceb1`) on the author's machine. After a ComfyUI
+  update, validate a two-segment render before starting a long job.
 - Resolution must remain constant between segments when continuity uses temporal latents.
 - Long chains can accumulate losses in picture detail, timbre, brightness, and saturation. A clean seam
   does not guarantee that content quality will remain constant down the chain.

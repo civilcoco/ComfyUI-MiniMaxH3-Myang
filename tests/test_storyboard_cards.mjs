@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import {
+
+// Imported from its real path rather than via a data URL: the module now pulls
+// in ./h3_prompt_layers.js, and a relative specifier cannot resolve from a data
+// URL. This file is .mjs so Node treats it as an ES module without flags; the
+// package's web/*.js files are ES modules too, imported the same way the
+// browser sees them.
+const {
     STORYBOARD_CARD_FORMAT,
     STORYBOARD_CARD_VERSION,
     createStoryboardCardDocument,
     parseStoryboardCardDocument,
     storyboardCardFileName,
-} from "../web/h3_storyboard_cards.js";
+} = await import(new URL("../web/h3_storyboard_cards.js", import.meta.url).href);
 
 const source = {
     shots: [
@@ -77,5 +83,44 @@ assert.throws(() => parseStoryboardCardDocument("not json"), /不是有效 JSON/
 
 const fileName = storyboardCardFileName('森林:短片?');
 assert.match(fileName, /^森林_短片__\d{4}-\d{2}-\d{2}\.h3storyboard\.json$/);
+
+// --- layered cards survive the round trip, unlayered ones stay unlayered ----
+const layered = createStoryboardCardDocument({
+    shots: [{
+        enabled: true,
+        duration_seconds: 8,
+        brief: "码头对峙",
+        prompt: "码头黄昏。\n阿岚（calm）<d>走吧。</d>",
+        layers: {
+            visual: "码头黄昏，主角站在集装箱前。",
+            subjects_override: ["阿岚：黑色风衣 @图片1"],
+            timeline: ["0-3s 缓慢推近，她抬头"],
+            sound: {ambient: "浪声", bgm: "", sfx: ["汽笛", " "]},
+            dialogue: [
+                {speaker: "阿岚", tone: "calm", text: "走吧。"},
+                {speaker: "老陈", tone: "nonsense", text: "<d>快上船！</d>"},
+                {speaker: "空", tone: "calm", text: "   "},
+            ],
+        },
+    }, source.shots[1]],
+    title: "分层卡",
+});
+const layeredCard = layered.storyboard.cards[0];
+assert.equal(layeredCard.layers.visual, "码头黄昏，主角站在集装箱前。");
+assert.deepEqual(layeredCard.layers.sound.sfx, ["汽笛"],
+    "blank sfx entries must not be exported as content");
+assert.equal(layeredCard.layers.dialogue.length, 2,
+    "an empty dialogue line should be dropped, not exported");
+assert.equal(layeredCard.layers.dialogue[1].tone, "calm",
+    "an unknown tone must fall back to the default speaking rate");
+assert.equal(layeredCard.layers.dialogue[1].text, "快上船！",
+    "<d> tags must be stripped inside the layer or they would nest on compose");
+assert.ok(!("layers" in layered.storyboard.cards[1]),
+    "a card that was never layered gained a layers key");
+
+const layeredBack = parseStoryboardCardDocument(JSON.stringify(layered));
+assert.deepEqual(layeredBack.shots[0].layers, layeredCard.layers);
+assert.ok(!("layers" in layeredBack.shots[1]),
+    "importing invented layers for an unlayered card");
 
 console.log("PASS structured storyboard card export/import round trip");

@@ -62,6 +62,9 @@ class ConfigSandbox:
         llm._config_mtime_ns = 0
         llm._config_source = None
         llm._route_counters.clear()
+        llm._rate_cooldowns.clear()
+        llm._rate_locks.clear()
+        llm._route_runtime.clear()
 
     def write_legacy(self, config):
         self.legacy.write_text(json.dumps(config, ensure_ascii=False), "utf-8")
@@ -298,6 +301,276 @@ def test_tpm_on_primary_fails_over_without_waiting():
         check(not sleeps, "client waited for primary cooldown while backup was available")
 
 
+def test_empty_primary_response_fails_over_to_next_route():
+    with ConfigSandbox() as box:
+        routed = service("multi", "多线路", llm_models=[model("glm", True)])
+        routed["route_strategy"] = "failover"
+        routed["routes"] = [
+            {"id": "primary", "name": "主线路", "enabled": True,
+             "base_url": "https://one.invalid/v1", "api_key": "key-one"},
+            {"id": "backup", "name": "备用线路", "enabled": True,
+             "base_url": "https://two.invalid/v1", "api_key": "key-two"},
+        ]
+        box.write_legacy({"model_services": [routed]})
+        calls = []
+        original_post = llm._http_post_json
+
+        def primary_empty(url, headers, payload, timeout=120):
+            calls.append(url)
+            if url.startswith("https://one.invalid/"):
+                return {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
+            return {"choices": [{"message": {"content": "backup-ok"}}]}
+
+        llm._http_post_json = primary_empty
+        try:
+            result = llm.call_llm("多线路/glm", "system", "user")
+        finally:
+            llm._http_post_json = original_post
+
+        check(result == "backup-ok", "empty primary response did not use the backup route")
+        check(len(calls) == 2 and calls[1].startswith("https://two.invalid/"),
+              "empty assistant content stopped routing before the backup")
+
+
+def test_all_cooling_stream_routes_fail_fast_without_inline_wait():
+    with ConfigSandbox() as box:
+        routed = service("cooling", "冷却服务", llm_models=[model("glm", True)])
+        box.write_legacy({"model_services": [routed]})
+        svc = llm._find_service("cooling")
+        route = llm._ordered_enabled_routes(svc, "llm")[0]
+        key = llm._route_state_key("cooling", str(route.get("id") or "route"))
+        llm._route_cooldowns[key] = llm.time.monotonic() + 10
+        llm._route_runtime[key] = {"reason": "rate_limit"}
+        waits = []
+        original_wait = llm._interruptible_cooldown_wait
+        original_post = llm._http_post_json
+
+        llm._interruptible_cooldown_wait = lambda seconds, service_id: waits.append(
+            (seconds, service_id))
+        llm._http_post_json = lambda url, headers, payload, timeout=120: {
+            "choices": [{"message": {"content": "ok"}}]}
+        try:
+            try:
+                llm.call_llm("冷却服务/glm", "system", "user")
+            except llm.LLMRoutesCoolingError:
+                pass
+            else:
+                raise AssertionError("cooling stream route unexpectedly executed")
+        finally:
+            llm._interruptible_cooldown_wait = original_wait
+            llm._http_post_json = original_post
+
+        check(not waits, "stream routing still waited through a 65s cooldown")
+
+
+def test_timeout_routes_use_15_second_probe_then_30_second_confirmation():
+    with ConfigSandbox() as box:
+        routed = service("slow", "慢服务", llm_models=[model("glm", True)])
+        routed["route_strategy"] = "failover"
+        routed["routes"] = [
+            {"id": "primary", "name": "主线路", "enabled": True,
+             "base_url": "https://one.invalid/v1", "api_key": "key-one"},
+            {"id": "backup", "name": "备用线路", "enabled": True,
+             "base_url": "https://two.invalid/v1", "api_key": "key-two"},
+        ]
+        box.write_legacy({"model_services": [routed]})
+        calls = []
+        waits = []
+        original_post = llm._http_post_json
+        original_wait = llm._interruptible_cooldown_wait
+
+        def timed_out(url, headers, payload, timeout=120):
+            calls.append((url, timeout))
+            raise llm.LLMRequestTimeoutError("request timed out")
+
+        llm._http_post_json = timed_out
+        llm._interruptible_cooldown_wait = lambda seconds, service_id: waits.append(seconds)
+        try:
+            try:
+                llm.call_llm("慢服务/glm", "system", "user")
+            except llm.LLMRequestTimeoutError:
+                pass
+            else:
+                raise AssertionError("two timed-out routes unexpectedly returned success")
+        finally:
+            llm._http_post_json = original_post
+            llm._interruptible_cooldown_wait = original_wait
+
+        check([timeout for _url, timeout in calls] == [15, 15, 30, 30],
+              "multi-route startup schedule was not 15s each then 30s each: %s" % (calls,))
+        check(calls[0][0].startswith("https://one.invalid/")
+              and calls[1][0].startswith("https://two.invalid/")
+              and calls[2][0].startswith("https://one.invalid/")
+              and calls[3][0].startswith("https://two.invalid/"),
+              "confirmation round did not preserve route order: %s" % (calls,))
+        check(not waits, "timeout failures waited through a cooldown before retrying")
+
+
+def test_single_route_waits_at_most_30_seconds_once():
+    with ConfigSandbox() as box:
+        routed = service("single", "单线路", llm_models=[model("glm", True)])
+        box.write_legacy({"model_services": [routed]})
+        calls = []
+        original_post = llm._http_post_json
+
+        def timed_out(url, headers, payload, timeout=120):
+            calls.append(timeout)
+            raise llm.LLMRequestTimeoutError("request timed out")
+
+        llm._http_post_json = timed_out
+        try:
+            try:
+                llm.call_llm("单线路/glm", "system", "user")
+            except llm.LLMRequestTimeoutError:
+                pass
+            else:
+                raise AssertionError("single timed-out route unexpectedly succeeded")
+        finally:
+            llm._http_post_json = original_post
+        check(calls == [30], "single route was not attempted exactly once for 30 seconds")
+
+
+def test_quota_failure_recovers_after_short_retry():
+    with ConfigSandbox() as box:
+        routed = service("quota-retry", "配额短暂服务", llm_models=[model("glm", True)])
+        box.write_legacy({"model_services": [routed]})
+        calls = []
+        original_post = llm._http_post_json
+        original_wait = llm._interruptible_cooldown_wait
+
+        def quota_then_success(url, headers, payload, timeout=120):
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise llm.LLMQuotaError("workspace quota exceeded")
+            return {"choices": [{"message": {"content": "恢复成功"}}]}
+
+        llm._http_post_json = quota_then_success
+        llm._interruptible_cooldown_wait = lambda seconds, service_id: None
+        try:
+            check(llm.call_llm("配额短暂服务/glm", "system", "user") == "恢复成功",
+                  "a transient quota response was not retried")
+        finally:
+            llm._http_post_json = original_post
+            llm._interruptible_cooldown_wait = original_wait
+        check(len(calls) == 2, "transient quota response did not get exactly one retry")
+
+
+def test_allocated_quota_body_is_retryable_before_confirmation():
+    body = {
+        "error": {
+            "message": "Workspace allocated quota exceeded, please increase your quota limit.",
+            "type": "invalid_request_error",
+            "code": "insufficient_quota",
+        }
+    }
+    try:
+        llm._stream_error(body)
+    except llm.LLMQuotaError as error:
+        check(llm._failure_policy(error)[0] == "quota_retry",
+              "the provider's allocated-quota body was treated as permanent")
+    else:
+        raise AssertionError("allocated-quota stream error was not classified")
+
+
+def test_quota_failures_confirm_after_ten_retries():
+    with ConfigSandbox() as box:
+        routed = service("quota", "配额服务", llm_models=[model("glm", True)])
+        routed["route_strategy"] = "failover"
+        routed["routes"] = [
+            {"id": "one", "name": "线路一", "enabled": True,
+             "base_url": "https://one.invalid/v1", "api_key": "key-one"},
+            {"id": "two", "name": "线路二", "enabled": True,
+             "base_url": "https://two.invalid/v1", "api_key": "key-two"},
+        ]
+        box.write_legacy({"model_services": [routed]})
+        calls = []
+        original_post = llm._http_post_json
+        original_wait = llm._interruptible_cooldown_wait
+
+        def quota_exhausted(url, headers, payload, timeout=120):
+            calls.append((url, timeout))
+            raise llm.LLMQuotaError("workspace quota exceeded")
+
+        llm._http_post_json = quota_exhausted
+        llm._interruptible_cooldown_wait = lambda seconds, service_id: None
+        try:
+            try:
+                llm.call_llm("配额服务/glm", "system", "user")
+            except RuntimeError as error:
+                check("连续 10 次" in str(error),
+                      "confirmed quota error did not explain the retry threshold")
+            else:
+                raise AssertionError("repeated quota failures unexpectedly succeeded")
+        finally:
+            llm._http_post_json = original_post
+            llm._interruptible_cooldown_wait = original_wait
+        check([timeout for _url, timeout in calls] == [15, 15] * 10,
+              "quota confirmation did not retry each route ten times: %s" % calls)
+
+
+def test_confirmed_quota_circuit_fails_fast_on_next_call():
+    with ConfigSandbox() as box:
+        routed = service("quota-blocked", "已确认配额服务", llm_models=[model("glm", True)])
+        box.write_legacy({"model_services": [routed]})
+        svc = llm._find_service("quota-blocked")
+        route = llm._normalize_routes(svc)[0]
+        key = llm._route_state_key("quota-blocked", route["id"])
+        llm._route_cooldowns[key] = llm.time.monotonic() + 1000
+        llm._route_runtime[key] = {"reason": "quota_exhausted", "quota_confirmed": True}
+        original_post = llm._http_post_json
+        calls = []
+        llm._http_post_json = lambda *args, **kwargs: calls.append(args) or {
+            "choices": [{"message": {"content": "unexpected"}}]}
+        try:
+            try:
+                llm.call_llm("已确认配额服务/glm", "system", "user")
+            except llm.LLMRoutesCoolingError:
+                pass
+            else:
+                raise AssertionError("confirmed quota circuit was retried")
+        finally:
+            llm._http_post_json = original_post
+        check(not calls, "confirmed quota circuit still called the provider")
+
+
+def test_switching_model_releases_only_the_old_quota_circuit():
+    with ConfigSandbox() as box:
+        routed = service("quota-switch", "切换模型服务",
+                         llm_models=[model("old"), model("new")])
+        box.write_legacy({"model_services": [routed]})
+        svc = llm._find_service("quota-switch")
+        route = llm._normalize_routes(svc)[0]
+        key = llm._route_state_key("quota-switch", route["id"])
+        llm._route_cooldowns[key] = llm.time.monotonic() + 1000
+        llm._route_runtime[key] = {
+            "reason": "quota_exhausted", "quota_confirmed": True,
+            "quota_model": "old",
+        }
+        original_once = llm._call_llm_once
+        calls = []
+        llm._call_llm_once = lambda service_str, *args, **kwargs: calls.append(service_str) or "new model ok"
+        try:
+            check(llm.call_llm("切换模型服务/new", "system", "user") == "new model ok",
+                  "a different model stayed blocked by the old quota circuit")
+        finally:
+            llm._call_llm_once = original_once
+        check(calls == ["切换模型服务/new"],
+              "model switch did not reach the selected model")
+
+
+def test_public_error_classifiers_survive_wrapping():
+    try:
+        try:
+            raise llm.LLMRateLimitError("API error 429: TPM exhausted")
+        except Exception as cause:
+            raise RuntimeError("Agent wrapper") from cause
+    except Exception as wrapped:
+        check(llm.is_rate_limit_error(wrapped),
+              "wrapped TPM failures are not classified by the Agent API")
+        check(llm.is_service_unavailable_error(wrapped),
+              "wrapped provider failures still trigger per-segment retry storms")
+
+
 if __name__ == "__main__":
     for test in (
         test_display_names_and_old_selections_resolve,
@@ -309,6 +582,16 @@ if __name__ == "__main__":
         test_route_keys_are_saved_independently_without_secret_echo,
         test_round_robin_uses_each_enabled_route,
         test_tpm_on_primary_fails_over_without_waiting,
+        test_empty_primary_response_fails_over_to_next_route,
+        test_all_cooling_stream_routes_fail_fast_without_inline_wait,
+        test_timeout_routes_use_15_second_probe_then_30_second_confirmation,
+        test_single_route_waits_at_most_30_seconds_once,
+        test_quota_failure_recovers_after_short_retry,
+        test_allocated_quota_body_is_retryable_before_confirmation,
+        test_quota_failures_confirm_after_ten_retries,
+        test_confirmed_quota_circuit_fails_fast_on_next_call,
+        test_switching_model_releases_only_the_old_quota_circuit,
+        test_public_error_classifiers_survive_wrapping,
     ):
         test()
         print("PASS", test.__name__)

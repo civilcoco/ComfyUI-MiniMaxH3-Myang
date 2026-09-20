@@ -83,7 +83,56 @@ def test_detail_settings_builder():
     assert cfg["steps"] == 4
     assert cfg["denoise"] == 0.2
     assert "lanczos" in cfg["upscale_method"]
+    assert cfg["reserve_vram_gb"] == 0.0
+    assert cfg["preview_interval"] == 0
+    assert detail.detail_memory_policy(detail.DETAIL_MEMORY_SPEED) == (0.0, 0)
+    assert detail.detail_memory_policy(detail.DETAIL_MEMORY_LOW) == (4.5, 0)
     print("PASS test_detail_settings_builder")
+
+
+def test_pixel_projection_restores_global_vram_reserve():
+    import comfy.model_management as model_management
+
+    observed = []
+
+    class FakeVAE:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def decode(self, _latent):
+            observed.append(model_management.EXTRA_RESERVED_VRAM)
+            return torch.zeros(1, 5, 32, 32, 3)
+
+        def encode(self, _images):
+            observed.append(model_management.EXTRA_RESERVED_VRAM)
+            if self.fail:
+                raise RuntimeError("expected test failure")
+            return torch.zeros(1, 16, 2, 30, 54)
+
+    original_reserve = model_management.EXTRA_RESERVED_VRAM
+    original_resize = detail.resize_frames
+    detail.resize_frames = lambda images, width, height, method, chunk: torch.zeros(
+        int(images.shape[0]), int(height), int(width), 3)
+    try:
+        latent = {"samples": torch.zeros(1, 16, 2, 2, 2)}
+        detail._project_latent(
+            latent, FakeVAE(), "480P", "16:9", 864, 480,
+            "pixel", 1, reserve_vram_gb=2.0)
+        assert model_management.EXTRA_RESERVED_VRAM == original_reserve
+        try:
+            detail._project_latent(
+                latent, FakeVAE(fail=True), "480P", "16:9", 864, 480,
+                "pixel", 1, reserve_vram_gb=2.0)
+        except RuntimeError as error:
+            assert "expected test failure" in str(error)
+        else:
+            raise AssertionError("broken VAE unexpectedly succeeded")
+        assert model_management.EXTRA_RESERVED_VRAM == original_reserve
+        assert observed and all(value >= 2.0 * 1024 ** 3 for value in observed)
+    finally:
+        detail.resize_frames = original_resize
+        model_management.EXTRA_RESERVED_VRAM = original_reserve
+    print("PASS test_pixel_projection_restores_global_vram_reserve")
 
 
 def test_learned_upscaler_cache_can_be_released():
@@ -96,5 +145,6 @@ def test_learned_upscaler_cache_can_be_released():
 if __name__ == "__main__":
     test_latent_upscaler_node()
     test_detail_settings_builder()
+    test_pixel_projection_restores_global_vram_reserve()
     test_learned_upscaler_cache_can_be_released()
     print("ALL LATENT UPSCALE TESTS PASSED!")

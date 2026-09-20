@@ -104,23 +104,42 @@ def test_longvideo_transfer_latent_continuity():
     expanded = res["expand"]
     anchor_nodes = [v for v in expanded.values()
                     if isinstance(v, dict) and v.get("class_type") == "H3AnchorContext"]
-    check(len(anchor_nodes) == 2,
-          f"expected one sample1 and one sample2 anchor, got {len(anchor_nodes)}")
-    pass_labels = set()
-    for anchor in anchor_nodes:
-        check("context_latent" in anchor["inputs"],
-              "seg 2 anchors must use lossless context_latent")
-        check("context_frames" not in anchor["inputs"],
-              "seg 2 anchor should not fall back to context_frames")
-        source = expanded[anchor["inputs"]["context_latent"][0]]
-        pass_label = source["inputs"].get("pass_label")
-        pass_labels.add(pass_label)
-        if pass_label == "sample2":
-            current_base = expanded[anchor["inputs"]["latent"][0]]
-            check(current_base.get("class_type") == "H3LatentUpscale",
-                  "sample2 anchor must preserve the current segment's upscaled latent")
-    check(pass_labels == {"sample1", "sample2"},
-          "low-resolution motion and high-resolution identity chains are not separate")
+    check(len(anchor_nodes) == 1,
+          f"expected one sample1 conditioning anchor, got {len(anchor_nodes)}")
+    anchor = anchor_nodes[0]
+    check("context_latent" in anchor["inputs"],
+          "seg 2 sample1 anchor must use lossless context_latent")
+    check("context_frames" not in anchor["inputs"],
+          "seg 2 sample1 anchor should not fall back to context_frames")
+    source_link = anchor["inputs"]["context_latent"]
+    source = expanded[source_link[0]]
+    check(source.get("class_type") == "H3LatentIdentity",
+          "sample1 continuity no longer uses the compact-tail identity link")
+    barrier_link = source["inputs"]["samples"]
+    barrier = expanded[barrier_link[0]]
+    check(barrier.get("class_type") == "H3SegmentMemoryBarrier"
+          and barrier_link[1] == 4,
+          "low-resolution motion chain did not consume the compact pass1 tail")
+    pass1_source = expanded[barrier["inputs"]["pass1_latent"][0]]
+    check(pass1_source["inputs"].get("pass_label") == "sample1",
+          "low-resolution motion chain did not originate from the previous sample1")
+
+    detail_seeds = [v for v in expanded.values()
+                    if isinstance(v, dict)
+                    and v.get("class_type") == "H3LatentOverlapSeed"]
+    check(len(detail_seeds) == 1,
+          f"expected one sample2 overlap seed, got {len(detail_seeds)}")
+    detail_seed = detail_seeds[0]
+    current_base = expanded[detail_seed["inputs"]["latent"][0]]
+    check(current_base.get("class_type") == "H3LatentUpscale",
+          "sample2 overlap must preserve the current segment's upscaled latent")
+    detail_link = detail_seed["inputs"]["context_latent"]
+    detail_source = expanded[detail_link[0]]
+    check(detail_source is barrier and detail_link[1] == 3,
+          "high-resolution identity chain did not consume the compact detail tail")
+    pass2_source = expanded[barrier["inputs"]["detail_latent"][0]]
+    check(pass2_source["inputs"].get("pass_label") == "sample2",
+          "high-resolution identity chain did not originate from the previous sample2")
     drift_nodes = [v for v in expanded.values()
                    if isinstance(v, dict) and v.get("class_type") == "H3DriftCorrect"]
     check(len(drift_nodes) == 0, "H3DriftCorrect should not appear after drift removal")

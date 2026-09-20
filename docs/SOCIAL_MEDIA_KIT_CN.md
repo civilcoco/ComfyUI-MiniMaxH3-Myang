@@ -20,7 +20,7 @@
 ```text
 项目：ComfyUI-MiniMaxH3-Myang
 代码与示例工作流：<https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang>
-版本：v0.1.0
+版本：v0.2.0
 
 主要功能：MiniMax H3 长视频自动分段、任意位置多关键帧、音画同步接缝、
 色彩漂移校正，以及可选 Turbo 与二采放大。

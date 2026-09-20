@@ -2,12 +2,11 @@
 
 SPDX-License-Identifier: GPL-3.0-only
 
-Copyright (C) 2026 Myang
-
 The catalog is the single contract shared by the Agent, Director and H3
-conditioning nodes.  Each asset owns both its runtime payload and descriptive
-metadata, so consumers never have to align two parallel lists or translate
-private prompt placeholders.
+conditioning nodes. Each asset keeps its runtime payload and descriptive
+metadata together, so consumers do not need parallel lists or private
+placeholder protocols. The small compatibility properties at the bottom of
+the data classes are for older saved workflows only.
 """
 
 from __future__ import annotations
@@ -37,41 +36,93 @@ def _kind(value: str) -> str:
     return normalized
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class MyangMediaAsset:
-    """One catalog entry with its payload and identity kept together."""
+    """One catalog entry with payload and identity kept together."""
 
     slot: int
     kind: str
     payload: Any
-    filename: str = ""
-    label: str = ""
-    origin: str = ""
+    filename: str
+    label: str
+    origin: str
+    reference_weight_mode: str
+    reference_weight: float
 
-    def __post_init__(self):
-        object.__setattr__(self, "slot", int(self.slot))
-        object.__setattr__(self, "kind", _kind(self.kind))
-        object.__setattr__(self, "filename", str(self.filename or "").strip())
-        object.__setattr__(self, "label", str(self.label or "").strip())
-        object.__setattr__(self, "origin", str(self.origin or "").strip())
+    def __init__(self, slot: int = 0, kind: str = "image", payload: Any = None,
+                 filename: str = "", label: str = "", origin: str = "",
+                 reference_weight_mode: str = "off", reference_weight: float = 1.0,
+                 *, input_index: int | None = None, media_type: str | None = None,
+                 value: Any = None):
+        if input_index is not None:
+            slot = input_index
+        if media_type is not None:
+            kind = media_type
+        if payload is None and value is not None:
+            payload = value
+        object.__setattr__(self, "slot", int(slot))
+        object.__setattr__(self, "kind", _kind(kind))
+        object.__setattr__(self, "payload", payload)
+        object.__setattr__(self, "filename", str(filename or "").strip())
+        object.__setattr__(self, "label", str(label or "").strip())
+        object.__setattr__(self, "origin", str(origin or "").strip())
+        mode = str(reference_weight_mode or "off").strip().lower()
+        object.__setattr__(self, "reference_weight_mode",
+                           mode if mode in {"auto", "manual"} else "off")
+        try:
+            weight = float(reference_weight or 1.0)
+        except (TypeError, ValueError):
+            weight = 1.0
+        object.__setattr__(self, "reference_weight",
+                           max(0.25, min(3.0, weight)))
+
+    @property
+    def input_index(self) -> int:
+        return self.slot
+
+    @property
+    def media_type(self) -> str:
+        return self.kind
+
+    @property
+    def value(self) -> Any:
+        return self.payload
 
     def carrying(self, payload: Any) -> "MyangMediaAsset":
-        """Return the same logical asset carrying a different runtime value."""
         return replace(self, payload=payload)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class MyangMediaCatalog:
     """Immutable, deterministically ordered media catalog."""
 
-    assets: tuple[MyangMediaAsset, ...] = ()
+    assets: tuple[MyangMediaAsset, ...]
+    links: tuple[dict[str, Any], ...]
 
-    def __post_init__(self):
-        assets = tuple(self.assets or ())
-        slots = [asset.slot for asset in assets]
+    def __init__(self, assets: Any = (), links: Any = (), *, items: Any = None):
+        if items is not None:
+            assets = items
+        normalized = []
+        for item in tuple(assets or ()):
+            if isinstance(item, MyangMediaAsset):
+                normalized.append(item)
+            elif isinstance(item, dict):
+                normalized.append(MyangMediaAsset(**item))
+            else:
+                normalized.append(MyangMediaAsset(
+                    input_index=getattr(item, "input_index", len(normalized) + 1),
+                    media_type=getattr(item, "media_type", "image"),
+                    value=getattr(item, "value", item)))
+        slots = [asset.slot for asset in normalized]
         if len(slots) != len(set(slots)):
             raise ValueError("H3-Myang: 素材目录里存在重复插槽")
-        object.__setattr__(self, "assets", assets)
+        object.__setattr__(self, "assets", tuple(normalized))
+        object.__setattr__(self, "links", tuple(
+            item for item in tuple(links or ()) if isinstance(item, dict)))
+
+    @property
+    def items(self) -> tuple[MyangMediaAsset, ...]:
+        return self.assets
 
     def ordered(self) -> tuple[MyangMediaAsset, ...]:
         return tuple(sorted(self.assets, key=lambda asset: (_KIND_ORDER[asset.kind], asset.slot)))
@@ -80,12 +131,12 @@ class MyangMediaCatalog:
         return max((asset.slot for asset in self.assets), default=0) + 1
 
     def appended(self, asset: MyangMediaAsset) -> "MyangMediaCatalog":
-        return MyangMediaCatalog(self.assets + (asset,))
+        return MyangMediaCatalog(self.assets + (asset,), self.links)
 
     def replacing_video(self, ordinal: int, payload: Any) -> tuple["MyangMediaCatalog", bool]:
         target = int(ordinal)
         seen = 0
-        updated: list[MyangMediaAsset] = []
+        updated = []
         replaced = False
         for asset in self.assets:
             if asset.kind == "video":
@@ -94,18 +145,17 @@ class MyangMediaCatalog:
                     asset = asset.carrying(payload)
                     replaced = True
             updated.append(asset)
-        return MyangMediaCatalog(tuple(updated)), replaced
+        return MyangMediaCatalog(tuple(updated), self.links), replaced
 
 
 def parse_asset_manifest(value: str) -> dict[int, dict[str, Any]]:
-    """Parse the browser's descriptive records, indexed by source slot."""
     try:
         decoded = json.loads(str(value or "[]"))
     except (TypeError, json.JSONDecodeError):
         return {}
     if not isinstance(decoded, list):
         return {}
-    records: dict[int, dict[str, Any]] = {}
+    records = {}
     for fallback, record in enumerate(decoded, 1):
         if not isinstance(record, dict):
             continue
@@ -117,17 +167,20 @@ def parse_asset_manifest(value: str) -> dict[int, dict[str, Any]]:
     return records
 
 
+def parse_media_links(value: str) -> list[dict[str, Any]]:
+    """Return browser metadata in its legacy list order."""
+    return list(parse_asset_manifest(value).values())
+
+
 def classify_payload(value: Any, hint: str = "") -> str:
-    """Classify a ComfyUI value without relying on another custom node pack."""
+    """Classify a ComfyUI value without relying on another node package."""
     if value is None:
         return ""
     suggested = str(hint or "").strip().lower()
-    if suggested == "picture":
+    if suggested in {"picture", "图片"}:
         suggested = "image"
-
     if hasattr(value, "get_components"):
         return "video"
-
     if isinstance(value, torch.Tensor):
         if value.ndim == 4:
             if suggested in {"image", "video"}:
@@ -136,9 +189,8 @@ def classify_payload(value: Any, hint: str = "") -> str:
         if value.ndim == 3:
             return "image"
         return suggested if suggested in MEDIA_KINDS else "image"
-
     if isinstance(value, dict):
-        if value.get("waveform") is not None:
+        if value.get("waveform") is not None or value.get("sample_rate") is not None:
             return "audio"
         frame_value = next((value.get(key) for key in ("images", "frames", "video", "samples")
                             if value.get(key) is not None), None)
@@ -148,16 +200,12 @@ def classify_payload(value: Any, hint: str = "") -> str:
                     and int(frame_value.shape[0]) == 1 and not timeline_keys.intersection(value)):
                 return suggested if suggested in {"image", "video"} else "image"
             return "video"
-
     if isinstance(value, (tuple, list)):
         if (len(value) >= 2 and isinstance(value[0], torch.Tensor)
                 and value[0].ndim <= 3 and isinstance(value[1], (int, float))
                 and float(value[1]) >= 1000):
             return "audio"
-        has_audio = False
-        has_still = False
-        has_video = False
-        has_fps = False
+        has_audio = has_still = has_video = has_fps = False
         for part in value:
             if isinstance(part, dict) and part.get("waveform") is not None:
                 has_audio = True
@@ -171,18 +219,12 @@ def classify_payload(value: Any, hint: str = "") -> str:
             elif isinstance(part, (int, float)) and not isinstance(part, bool):
                 has_audio = has_audio or float(part) >= 1000
                 has_fps = has_fps or 1 <= float(part) <= 240
-            elif isinstance(part, dict) and any(
-                    part.get(key) is not None for key in ("images", "frames", "video", "samples")):
-                has_video = True
-        if has_video:
-            return "video"
-        if has_still and (has_audio or has_fps):
+        if has_video or (has_still and (has_audio or has_fps)):
             return "video"
         if has_audio:
             return "audio"
         if has_still:
             return "image"
-
     if isinstance(value, (str, os.PathLike)):
         suffix = os.path.splitext(os.fspath(value))[1].lower()
         if suffix in _VIDEO_EXTENSIONS:
@@ -191,12 +233,10 @@ def classify_payload(value: Any, hint: str = "") -> str:
             return "audio"
         if suffix in _IMAGE_EXTENSIONS:
             return "image"
-
     return suggested if suggested in MEDIA_KINDS else "image"
 
 
 def image_batch(value: Any) -> torch.Tensor:
-    """Return an IMAGE-compatible NHWC batch from supported ComfyUI values."""
     if isinstance(value, torch.Tensor):
         if value.ndim == 3:
             return value.unsqueeze(0)
@@ -222,7 +262,6 @@ def image_batch(value: Any) -> torch.Tensor:
 
 
 def audio_track(value: Any) -> dict[str, Any] | None:
-    """Return a normalized ComfyUI AUDIO dictionary, or None for no audio."""
     if value is None:
         return None
     if hasattr(value, "audio"):
@@ -252,15 +291,12 @@ def audio_track(value: Any) -> dict[str, Any] | None:
 
 
 def video_stream(value: Any) -> tuple[torch.Tensor, dict[str, Any] | None, float]:
-    """Return ``(frames, optional audio, fps)`` for supported video carriers."""
     if value is None:
         raise ValueError("H3-Myang: 参考视频为空")
     if hasattr(value, "get_components"):
         components = value.get_components()
-        frames = image_batch(components.images)
-        sound = audio_track(getattr(components, "audio", None))
-        rate = float(getattr(components, "frame_rate", 24.0) or 24.0)
-        return frames, sound, rate
+        return (image_batch(components.images), audio_track(getattr(components, "audio", None)),
+                float(getattr(components, "frame_rate", 24.0) or 24.0))
     if isinstance(value, torch.Tensor):
         return image_batch(value), None, 24.0
     if isinstance(value, dict):
@@ -271,8 +307,7 @@ def video_stream(value: Any) -> tuple[torch.Tensor, dict[str, Any] | None, float
             rate = float(value.get("fps") or value.get("frame_rate") or value.get("framerate") or 24.0)
             return image_batch(frames), audio_track(sound), rate
     if isinstance(value, (tuple, list)):
-        frames = None
-        sound = None
+        frames = sound = None
         rate = 24.0
         for part in value:
             if frames is None:
@@ -295,14 +330,13 @@ def video_stream(value: Any) -> tuple[torch.Tensor, dict[str, Any] | None, float
 
 def asset_from_input(slot: int, payload: Any, metadata: dict[str, Any] | None = None) -> MyangMediaAsset:
     details = metadata or {}
-    hint = str(details.get("kind") or details.get("media_type") or "")
     return MyangMediaAsset(
         slot=slot,
-        kind=classify_payload(payload, hint),
+        kind=classify_payload(payload, details.get("kind") or details.get("media_type")),
         payload=payload,
-        filename=str(details.get("filename") or ""),
-        label=str(details.get("label") or details.get("subject") or ""),
-        origin=str(details.get("origin") or details.get("source") or "agent"),
+        filename=details.get("filename") or "",
+        label=details.get("label") or details.get("subject") or "",
+        origin=details.get("origin") or details.get("source") or "agent",
     )
 
 
@@ -319,15 +353,8 @@ def iter_catalog(catalog: MyangMediaCatalog | None) -> Iterator[tuple[str, Any, 
 
 
 __all__ = [
-    "MAX_ASSETS",
-    "MyangMediaAsset",
-    "MyangMediaCatalog",
-    "asset_from_input",
-    "audio_track",
-    "catalog_rows",
-    "classify_payload",
-    "image_batch",
-    "iter_catalog",
-    "parse_asset_manifest",
+    "MAX_ASSETS", "MEDIA_KINDS", "MyangMediaAsset", "MyangMediaCatalog",
+    "asset_from_input", "audio_track", "catalog_rows", "classify_payload",
+    "image_batch", "iter_catalog", "parse_asset_manifest", "parse_media_links",
     "video_stream",
 ]

@@ -64,6 +64,20 @@ git clone https://github.com/civilcoco/ComfyUI-MiniMaxH3-Myang.git
 选择本地 Whisper 转写时，才需要单独安装 `openai-whisper`；NVIDIA RTX VSR 路径还需要
 用户另行安装 NVIDIA VFX 运行时。
 
+### 可选增强节点包
+
+导演台有两个开关会在打开时才加载第三方节点包；关闭时核心导演台、原生锚点、二采和音频链
+完全不会导入它们。
+
+- **角色五视图 / 动作修复** 使用 [ComfyUI-MAINodes](https://github.com/AIMixer/ComfyUI-MAINodes)
+  （`H3ContactSheet`、`H3ContactSheetDecode`、`H3JerkOracle`、`H3TimeSmear`、`H3InjectSchedule`、
+  `H3ExactRecover`、`H3AudioRecover`）以及对应的五视图 LoRA。
+- **小脸精修** 使用 [ComfyUI-H3-FaceRefine](https://github.com/AIMixer/ComfyUI-H3-FaceRefine)
+  （`H3FaceTrackCrop`、`H3InjectVideoLatent`、`H3PerFrameDenoise`、`H3FaceStitch`）和人脸检测模型。
+  长视频节点会在正式采样前检查节点与检测模型是否就绪。
+
+未安装这两个包时，对应的回归测试会显示 `SKIP`，不算失败。
+
 ## 快速开始
 
 推荐先打开：
@@ -183,8 +197,10 @@ Turbo 使用固定 NFE 轨迹，需配合 `simple` scheduler、`denoise=1.0` 和
 请勿对它使用文件名 Auto 识别。除非已经自行验证手动 shift，否则只使用上表档位，或等待
 本包显式支持该权重的后续版本。
 
-Turbo 节点也提供可选的 TE-Speed 与 Spectrum 缓存模式。它们需要用户另行安装对应的相邻
-自定义节点包；未找到时，本包会给出警告并关闭该缓存继续运行。
+Turbo 节点保留了旧的 `speed_cache` 控件，只为让旧工作流仍能通过校验；内置的 TE-Speed 与
+Spectrum 挂载已停用——两者都持有不透明的缓存/历史状态，无法与当前的 H3 注意力和显存补丁链
+安全组合。保存值不是“关闭”时会记一行日志并忽略。官方 Turbo LoRA 之后可按顺序再叠加最多
+3 个普通 H3 效果 LoRA，不改变官方调度。
 
 参数依据：
 [LightX2V 模型页](https://huggingface.co/lightx2v/Minimax-h3-Turbo) 和
@@ -198,9 +214,17 @@ Turbo 节点也提供可选的 TE-Speed 与 Spectrum 缓存模式。它们需要
 - 同分辨率二采；
 - 仅放大，不二采。
 
-放大方式包括像素/VAE、bislerp Latent、神经 3D Latent 和 NVIDIA RTX VSR。长视频按段
-处理，最终音频直接使用一采结果，只执行接缝和时长裁剪。二采模型应使用未挂 Turbo LoRA
-的 Ref2VA 基模。
+放大方式为像素/VAE 投影、神经 3D Latent 和 NVIDIA RTX VSR。原来的 bislerp Latent 插值已从
+二采菜单移除：H3 的 latent 是时间压缩的，bislerp 会把解码成不同运动状态的单元混在一起产生
+鬼影，它的“解法”（VAE 解码→编码投影）就是像素路径。它仍可在“沐阳 H3 · Latent 直接放大”
+不接 `vae` 时使用。长视频按段处理，最终音频直接使用一采结果，只执行接缝和时长裁剪。
+二采模型应使用未挂 Turbo LoRA 的 Ref2VA 基模；导演台会拒绝把 Turbo 输出接到『二采模型』。
+
+二采默认复用一采条件（“复用文本/素材条件”）。按二采分辨率重建条件会把每张参考图重新
+拟合到更大面积，参考 token 布局随之改变，低降噪的几步收不回来，表现为涂抹和轻微身份漂移。
+显存策略块控制二采保留多少可用显存和多久解码一次清晰逐步预览；16GB Windows 显卡上，
+自动档会在二采模型加载前主动释放一采、VAE 和放大器的驻留，真的 OOM 时换出部分权重页后
+按同一种子重试一次。
 
 神经 3D 模式兼容 LBH-123-AI 发布的 24 通道 H3 Latent Upscaler 权重。权重需要由用户
 下载并放入：
@@ -212,8 +236,8 @@ ComfyUI/models/latent_upscale_models/
 权重与说明：
 [LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)
 
-建议从 `fp16`、时间分块 `16` 开始；显存不足时改为 `8`，出现精度或色块问题时尝试
-`fp32`。
+建议从 `fp16`、时间分块 `0`（全上下文单次推理，无接缝）开始；显存不足再把分块调到
+`16` 或 `8`，分块边界会交叉淡化而不是硬拼；出现精度或色块问题时尝试 `fp32`。
 
 ## 主要节点
 
@@ -239,8 +263,8 @@ ComfyUI/models/latent_upscale_models/
 
 ## 兼容性与限制
 
-- 已对 ComfyUI `v0.33.2` 和 `v0.34.0` 的 H3 layout 完成 CPU 结构回归；更新 ComfyUI
-  后建议先跑两段短片，再开始长任务。
+- 已对 ComfyUI `v0.33.2` 和 `v0.34.0` 的 H3 layout 完成 CPU 结构回归，作者本机按
+  `v0.33.2`（`7cee3ceb1`）实际运行；更新 ComfyUI 后建议先跑两段短片，再开始长任务。
 - 使用 temporal latent 续接时，各段分辨率必须一致。
 - 越长的生成链越容易积累画质、音色、亮度和饱和度漂移。接缝连续不代表内容不会逐段退化。
 - Turbo、缓存、注意力补丁和二采都会改变速度、显存或画质。排查问题时，先使用无外围优化

@@ -18,7 +18,7 @@ for path in (str(COMFY_ROOT), str(CUSTOM_NODES)):
 package = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 agent_module = importlib.import_module("ComfyUI-MiniMaxH3-Myang.agent_nodes")
 nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-media_types = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
+media_types = importlib.import_module("ComfyUI-MiniMaxH3-Myang.agent_media")
 
 
 def check(condition, message):
@@ -36,8 +36,8 @@ class FakeBundle:
         return object()
 
 
-def test_agent_myang_prompt_generation():
-    """Verify that MiniMaxH3MediaAgent outputs myang_prompt in slot 4."""
+def test_agent_easy_prompt_generation():
+    """Verify that MiniMaxH3MediaAgent outputs easy_prompt in slot 4."""
     frames = torch.zeros(5, 2, 2, 3)
     links = [{"order": 1, "media_type": "video", "filename": "action.mp4"}]
     prompt_text = "参考@视频1的动作，镜头平推靠近，少女微笑着挥手。"
@@ -50,14 +50,14 @@ def test_agent_myang_prompt_generation():
         strict_media_check=True,
         ollama_auto_unload=True,
         seed=0,
-        asset_1=frames,
-        asset_manifest_json=json.dumps(links, ensure_ascii=False),
+        media_1=frames,
+        media_links_json=json.dumps(links, ensure_ascii=False),
         时长=10.0,
     )
     result = res["result"]
-    myang_prompt = result[4]
-    check(isinstance(myang_prompt, str), "myang_prompt must be a string")
-    check("@视频1" in myang_prompt, "@视频1 tag should be preserved in myang_prompt")
+    easy_prompt = result[4]
+    check(isinstance(easy_prompt, str), "easy_prompt must be a string")
+    check("@视频1" in easy_prompt, "@视频1 tag should be preserved in easy_prompt")
 
 
 def test_script_splitter_empty_script():
@@ -228,13 +228,74 @@ def test_longvideo_consumes_plan_json_prompts_without_separate_prompt():
     check(cond2_prompt == "第2段提示词内容：主角跳跃", f"cond2 prompt mismatch: {cond2_prompt}")
 
 
+def test_dialogue_budget_spills_instead_of_overstuffing_one_shot():
+    """A conversation longer than its shot moves on rather than being crammed in.
+
+    This is the failure the layering was built for: the writer agent audits
+    dialogue against its own shot plan, but the Director's real segment seconds
+    are only known later, so a whole exchange used to land inside one 8s shot.
+    """
+    talk = [
+        {"speaker": "阿岚", "tone": "calm", "text": "你终于来了，我等了整整三年。"},
+        {"speaker": "阿岚", "tone": "calm", "text": "这批货一旦上船，我们就再也回不了头了。"},
+        {"speaker": "老陈", "tone": "excited", "text": "别废话！他们的人已经封了西边出口！"},
+        {"speaker": "阿岚", "tone": "calm", "text": "那就走水路，我早就备好了船。"},
+    ]
+    segments = [
+        {"index": 1, "layers": {"visual": "码头黄昏。", "dialogue": list(talk)}},
+        {"index": 2, "layers": {"visual": "快艇驶离。", "dialogue": []}},
+    ]
+    notes = nodes.enforce_dialogue_budget(segments, lambda _seg: 8.0)
+    first = segments[0]["layers"]["dialogue"]
+    second = segments[1]["layers"]["dialogue"]
+    check(len(first) + len(second) == len(talk),
+          "the dialogue budget dropped lines instead of deferring them")
+    check(0 < len(first) < len(talk),
+          "an 8 second shot still swallowed the whole conversation")
+    check(second[0]["text"] == talk[len(first)]["text"],
+          "spilled dialogue did not keep its order")
+    check(any("顺延" in note for note in notes),
+          "the spill was silent; the operator cannot see why a line moved")
+
+    audit = importlib.import_module("ComfyUI-MiniMaxH3-Myang.dialogue_audit")
+    kept_seconds = sum(
+        audit.speech_units(entry["text"]) / audit.SPEECH_RATES[entry["tone"]][1]
+        for entry in first)
+    check(kept_seconds <= 8.05,
+          "what stayed in shot 1 still cannot be spoken in 8 seconds")
+
+
+def test_layered_segment_composes_one_prompt_with_dialogue_last():
+    """Layers are flattened deterministically; H3 still receives one string."""
+    layers = {
+        "visual": "码头黄昏，主角站在集装箱前。<d>这句会被预算层替换</d>",
+        "sound": {"ambient": "浪声", "bgm": "低沉弦乐", "sfx": ["汽笛", "脚步声"]},
+        "dialogue": [{"speaker": "阿岚", "tone": "calm", "text": "走吧。"}],
+    }
+    composed = nodes.compose_segment_prompt({"style": "电影级写实"}, layers)
+    check("这句会被预算层替换" not in composed,
+          "the writer's inline dialogue survived alongside the budgeted layer")
+    check(composed.count("<d>") == 1 and "<d>走吧。</d>" in composed,
+          "the budgeted dialogue line was not wrapped exactly once")
+    check("阿岚（calm）" in composed.split("<d>")[0].splitlines()[-1],
+          "speaker/tone leaked inside the <d> tag and would be billed as speech")
+    check(composed.index("环境音：浪声") < composed.index("<d>"),
+          "sound must be composed before dialogue so the tail reads as speech")
+
+    empty = nodes.compose_segment_prompt({}, {"visual": "只有画面。"})
+    check(empty == "只有画面。",
+          "a segment without sound or dialogue gained composed scaffolding")
+
+
 if __name__ == "__main__":
     for test in (
-        test_agent_myang_prompt_generation,
+        test_agent_easy_prompt_generation,
         test_script_splitter_empty_script,
         test_script_splitter_manual_llm_toggle,
         test_script_splitter_plan_json_contains_prompts,
         test_longvideo_consumes_plan_json_prompts_without_separate_prompt,
+        test_dialogue_budget_spills_instead_of_overstuffing_one_shot,
+        test_layered_segment_composes_one_prompt_with_dialogue_last,
     ):
         test()
         print("PASS", test.__name__)

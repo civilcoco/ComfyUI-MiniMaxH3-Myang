@@ -76,13 +76,32 @@ Python 回归需要导入 ComfyUI 和 PyTorch，因此应使用实际 ComfyUI �
 
 ## GitHub 与 Registry 发布顺序
 
+### 使用 ugit 提交和推送
+
+1. 在 ugit 中打开准备发布的 `ComfyUI-MiniMaxH3-Myang` 仓库目录。
+2. 在当前开发分支提交全部待发布改动，包含新增文件和已删除文件。`skills/README.md`
+   与 `skills/.gitignore` 是可提交的公开文件；其余本地 Skills、缓存和测试临时目录
+   已被忽略，不要强制添加。
+3. 如果当前分支是 `minimax-improvements`，提交后切换到 `main`，合并
+   `minimax-improvements`，再推送 `main` 到 `origin`。只推送开发分支不会更新默认分支。
+   如果远程 `main` 有新提交，先同步并处理冲突，再完成合并与推送。
+4. 确认 GitHub 上 `main` 的 `Release checks` 全部通过，再在该提交上创建
+   `v0.2.0` 标签和 GitHub Release；不要覆盖旧标签。
+5. 如需发布到 Comfy Registry，继续手动运行下文的发布工作流。
+
+ugit 的普通提交和推送只更新 GitHub 源码；本仓库的 Registry 发布工作流
+需要在 GitHub Actions 中单独点击 `Run workflow`。
+
+### 完整发布清单
+
 1. 运行严格发布审计，确认不再出现身份占位符警告。
 2. 检查待提交文件，确认没有 `release-excluded`、模型权重、生成媒体、缓存、
    API Key、个人路径或私人素材。
 3. 提交已经清洗的源码，并推送到 `pyproject.toml` 中填写的 GitHub 仓库。
-4. 在全新克隆的仓库中重新运行发布审计和测试。
+4. 在全新克隆的仓库中运行 `tools/run_tests.ps1 -ComfyRoot <path-to-ComfyUI>`；它会先复制
+   干净源码快照，再执行全部 Python/JS 回归、原生素材审计和严格发布审计。
 5. 在干净的 ComfyUI 环境中打开两个示例工作流，检查缺失节点提示和基础连线。
-6. 创建带说明的 `v0.1.0` 标签，并发布 GitHub Release。
+6. 创建带说明的 `v0.2.0` 标签，并发布 GitHub Release；保留已有的 `v0.1.0` 标签。
 7. 在 GitHub Actions 中手动运行 `Publish to Comfy Registry`；也可以使用
    `comfy node publish` 作为本地备用方式。
 8. 确认用户能够通过 Registry 或 ComfyUI-Manager 安装，并检查发布包内容。

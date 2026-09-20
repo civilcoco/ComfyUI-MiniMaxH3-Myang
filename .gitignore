@@ -15,8 +15,13 @@ _patch_probe*
 .vscode/
 Thumbs.db
 .DS_Store
-skills/_skill_index.json
-skills/_skill_memory.json
+skills/*
+!skills/README.md
+!skills/.gitignore
+docs/research/
+tests/h3_pass1_checkpoint_*/
+tests/probe_*/
+tests/tmp*/
 release-report.json
 dist/
 build/

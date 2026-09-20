@@ -25,6 +25,8 @@ PROFILES = [PROFILE_AUTO, PROFILE_8_V1, PROFILE_4_V1_768,
             PROFILE_REF_4_V01, PROFILE_4_V01, PROFILE_MANUAL]
 
 LORA_EXTERNAL = "不在本节点加载（兼容旧工作流）"
+LORA_NONE = "不使用"
+ADDITIONAL_LORA_SLOTS = 3
 
 TURBO_MARKER = "myang_h3_turbo_schedule"
 
@@ -119,6 +121,23 @@ def _lora_choices():
     return [LORA_EXTERNAL, *[name for name in names if name != LORA_EXTERNAL]]
 
 
+def _additional_lora_choices():
+    return [LORA_NONE, *[
+        name for name in _lora_choices()
+        if name not in {LORA_EXTERNAL, LORA_NONE}
+    ]]
+
+
+def _enabled(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "1", "yes", "on", "开启", "启用"}
+    return False
+
+
 def turbo_metadata(model):
     """Read this package's non-invasive schedule contract from a MODEL."""
     options = getattr(model, "model_options", None)
@@ -134,6 +153,10 @@ def sampler_function_name(sampler):
 
 
 SPEED_CACHE_OFF = "关闭"
+# Kept only so workflows serialized by older releases still pass ComfyUI's
+# combo validation.  These values are hidden by the frontend and are no longer
+# mounted onto the model: both integrations retained opaque/history state and
+# were unsafe to compose with the current H3 attention/memory patch chain.
 SPEED_CACHE_TESPEED = "TE-Speed 时步缓存 (提速40%)"
 SPEED_CACHE_SPECTRUM = "Spectrum 频谱加速 (提速35%)"
 SPEED_CACHES = [SPEED_CACHE_OFF, SPEED_CACHE_TESPEED, SPEED_CACHE_SPECTRUM]
@@ -148,15 +171,16 @@ class H3TurboSchedule:
     DESCRIPTION = (
         "合并 ComfyUI『LoRA加载器（仅模型）』与官方 H3 Sigma Shift。"
         "既可在本节点选择 LightX2V LoRA，也能沿用旧图上游已加载的 LoRA；"
-        "自动匹配视频/音频联合轨迹，可查看实际 Shift 并按需手动覆盖，"
-        "同时支持 TE-Speed / Spectrum 加速缓存。")
+        "官方 Turbo 后可按顺序叠加最多 3 个普通 H3 效果 LoRA，且不改变官方调度；"
+        "自动匹配视频/音频联合轨迹，可查看实际 Shift 并按需手动覆盖。"
+        "旧版内置的 TE-Speed / Spectrum 挂载已停用，避免额外占用显存/内存及补丁冲突。")
 
     def __init__(self):
         self._lora_loader = None
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
+        required = {
             "model": ("MODEL", {
                 "tooltip": "新图接基础 MODEL 并在下方选择 LoRA；旧图也可接上游已加载 LoRA 的 MODEL"}),
             "profile": (PROFILES, {
@@ -164,7 +188,8 @@ class H3TurboSchedule:
                 "tooltip": "自动档会按官方 ComfyUI LoRA 文件名识别 FL2VA/Ref2VA、4/8步和768P"}),
             "speed_cache": (SPEED_CACHES, {
                 "default": SPEED_CACHE_OFF,
-                "tooltip": "一键挂载加速插件：TE-Speed 适合时步残差跳过，Spectrum 适合频谱特征预测，可提速 35%~45%。"}),
+                "advanced": True,
+                "tooltip": "旧工作流位置兼容占位；TE-Speed / Spectrum 内置挂载已移除，始终按关闭处理。"}),
             "shift_video": ("FLOAT", {
                 "default": 12.0, "min": 0.01, "max": 100.0, "step": 0.01,
                 "advanced": True, "tooltip": "在『手动』档或开启『手动覆盖Shift』时生效"}),
@@ -185,18 +210,58 @@ class H3TurboSchedule:
                 "label_on": "使用自定义 Shift",
                 "label_off": "使用档位官方 Shift",
                 "tooltip": "关闭时严格采用所选 LightX2V 档位；开启后使用上方视频/音频 Shift，属于高级实验设置"}),
-        }}
+            "附加LoRA开启": ("BOOLEAN", {
+                "default": False,
+                "label_on": "启用附加效果 LoRA",
+                "label_off": "不叠加其他 LoRA",
+                "tooltip": "在官方 Turbo LoRA 之后最多叠加 3 个自定义 H3 LoRA；它们不参与 Turbo 档位、步数或 Shift 推断"}),
+        }
+        choices = _additional_lora_choices()
+        for index in range(1, ADDITIONAL_LORA_SLOTS + 1):
+            required["附加LoRA%d启用" % index] = ("BOOLEAN", {
+                "default": False,
+                "label_on": "启用槽位 %d" % index,
+                "label_off": "关闭槽位 %d" % index,
+            })
+            required["附加LoRA%d文件" % index] = (choices, {
+                "default": LORA_NONE,
+                "tooltip": "选择角色、画风、动作等兼容 MiniMax H3 的普通 LoRA；不要在这里重复选择官方 Turbo LoRA",
+            })
+            required["附加LoRA%d强度" % index] = ("FLOAT", {
+                "default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01,
+                "tooltip": "该附加 LoRA 的模型强度；允许负值，0 等同跳过",
+            })
+        return {"required": required}
 
     def apply(self, model, profile, speed_cache=SPEED_CACHE_OFF, shift_video=12.0, shift_audio=3.0,
               recommended_steps=8, **kwargs):
         lora_name = str(kwargs.get("LoRA文件", LORA_EXTERNAL) or LORA_EXTERNAL)
         lora_strength = float(kwargs.get("LoRA强度", 1.0))
         loads_here = lora_name != LORA_EXTERNAL
-        existing = turbo_metadata(model)
-        if loads_here and existing is not None:
+        additional_loras = []
+        if _enabled(kwargs.get("附加LoRA开启", False)):
+            for index in range(1, ADDITIONAL_LORA_SLOTS + 1):
+                if not _enabled(kwargs.get("附加LoRA%d启用" % index, False)):
+                    continue
+                name = str(kwargs.get(
+                    "附加LoRA%d文件" % index, LORA_NONE) or LORA_NONE)
+                strength = float(kwargs.get("附加LoRA%d强度" % index, 1.0))
+                if name == LORA_NONE or strength == 0.0:
+                    continue
+                additional_loras.append({
+                    "slot": index, "name": name, "strength": strength})
+        selected_names = ([lora_name] if loads_here else []) + [
+            item["name"] for item in additional_loras]
+        duplicates = sorted({
+            name for name in selected_names if selected_names.count(name) > 1})
+        if duplicates:
             raise ValueError(
-                "H3-Myang: 输入模型已经带 Turbo 调度标记，不能再次加载 LoRA；"
-                "请接 LoRA 之前的基础模型")
+                "H3-Myang: 同一个 LoRA 不能重复叠加：%s" % "、".join(duplicates))
+        existing = turbo_metadata(model)
+        if (loads_here or additional_loras) and existing is not None:
+            raise ValueError(
+                "H3-Myang: 输入模型已经带 Turbo 调度标记，不能再次叠加 LoRA；"
+                "请把本节点接到 LoRA 之前的基础模型")
 
         if str(profile) not in (PROFILE_AUTO, PROFILE_MANUAL) and loads_here:
             inferred = infer_profile(lora_name, strict=False)
@@ -230,14 +295,22 @@ class H3TurboSchedule:
         })
 
         working_model = model
-        if loads_here:
+        if loads_here or additional_loras:
             if self._lora_loader is None:
                 from nodes import LoraLoaderModelOnly
                 self._lora_loader = LoraLoaderModelOnly()
+        if loads_here:
             loaded = self._lora_loader.load_lora_model_only(
                 model, lora_name, lora_strength)
             if not isinstance(loaded, (tuple, list)) or not loaded:
                 raise RuntimeError("H3-Myang: ComfyUI LoRA加载器（仅模型）没有返回 MODEL")
+            working_model = loaded[0]
+        for item in additional_loras:
+            loaded = self._lora_loader.load_lora_model_only(
+                working_model, item["name"], item["strength"])
+            if not isinstance(loaded, (tuple, list)) or not loaded:
+                raise RuntimeError(
+                    "H3-Myang: 附加 LoRA %d 没有返回 MODEL" % item["slot"])
             working_model = loaded[0]
 
         from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
@@ -252,52 +325,18 @@ class H3TurboSchedule:
             raise RuntimeError("H3-Myang: 官方 MiniMaxH3SigmaShift 没有返回 MODEL")
         patched = values[0]
 
-        # Seamlessly mount TE-Speed or Spectrum speed cache
-        if str(speed_cache) == SPEED_CACHE_TESPEED:
-            try:
-                import importlib.util, sys
-                from pathlib import Path
-                cn_root = Path(__file__).resolve().parent.parent
-                pyd_path = cn_root / "TE-Speed-MiniMaxH3" / "nodes.pyd"
-                py_path = cn_root / "TE-Speed-MiniMaxH3" / "nodes.py"
-                target_path = pyd_path if pyd_path.exists() else py_path
-                pyd_loader_spec = importlib.util.spec_from_file_location("nodes", str(target_path))
-                te_mod = importlib.util.module_from_spec(pyd_loader_spec)
-                pyd_loader_spec.loader.exec_module(te_mod)
-                te_cls = getattr(te_mod, "TESpeedMiniMaxH3")
-                te_inst = te_cls()
-                te_fn = getattr(te_inst, getattr(te_cls, "FUNCTION", "patch"), getattr(te_inst, "patch", None))
-                if te_fn is None:
-                    raise AttributeError("TESpeedMiniMaxH3 node has neither FUNCTION nor patch method")
-                te_res = te_fn(patched, processing_control_value=0.12, processing_percent_1=0.1, processing_percent_2=0.9, mcs=2, device="auto")
-                patched = te_res[0] if isinstance(te_res, (tuple, list)) else te_res
-                logger.info("H3-Myang: 成功挂载 TE-Speed-MiniMaxH3 时步加速缓存")
-            except Exception as exc:
-                logger.warning("H3-Myang: 挂载 TE-Speed 失败，回退原生执行: %s", exc)
-        elif str(speed_cache) == SPEED_CACHE_SPECTRUM:
-            try:
-                import importlib.util, sys
-                from pathlib import Path
-                cn_root = Path(__file__).resolve().parent.parent
-                sp_dir = cn_root / "ComfyUI-Spectrum-MiniMax-H3"
-                if str(sp_dir) not in sys.path:
-                    sys.path.insert(0, str(sp_dir))
-                sp_py = sp_dir / "nodes.py"
-                sp_loader_spec = importlib.util.spec_from_file_location("spectrum_nodes", str(sp_py))
-                sp_mod = importlib.util.module_from_spec(sp_loader_spec)
-                sp_loader_spec.loader.exec_module(sp_mod)
-                sp_cls = getattr(sp_mod, "SpectrumApplyMiniMaxH3")
-                sp_inst = sp_cls()
-                sp_fn = getattr(sp_inst, getattr(sp_cls, "FUNCTION", "apply"), getattr(sp_inst, "apply", None))
-                if sp_fn is None:
-                    raise AttributeError("SpectrumApplyMiniMaxH3 node has neither FUNCTION nor apply method")
-                sp_res = sp_fn(patched, enabled=True, blend_weight=0.5, degree=4, ridge_lambda=0.10,
-                               window_size=2.0, flex_window=0.75, warmup_steps=5, tail_actual_steps=1,
-                               max_history=8, debug=False, history_storage="system_ram")
-                patched = sp_res[0] if isinstance(sp_res, (tuple, list)) else sp_res
-                logger.info("H3-Myang: 成功挂载 Spectrum-MiniMax-H3 频谱预测加速")
-            except Exception as exc:
-                logger.warning("H3-Myang: 挂载 Spectrum 失败，回退原生执行: %s", exc)
+        # `speed_cache` remains in the signature solely to preserve the widget
+        # positions of existing workflows.  Older builds dynamically imported
+        # TE-Speed/Spectrum here.  That bypassed ComfyUI's registered-node
+        # contract, retained additional cache/history memory, and made patch
+        # ordering depend on opaque third-party implementations.  Never mount
+        # either cache from this combined loader.
+        requested_speed_cache = str(speed_cache or SPEED_CACHE_OFF)
+        if requested_speed_cache != SPEED_CACHE_OFF:
+            logger.warning(
+                "H3-Myang: 旧工作流请求的加速缓存『%s』已停用并忽略；"
+                "Turbo LoRA/Sigma Shift 将按原生方式运行",
+                requested_speed_cache)
 
         options = getattr(patched, "model_options", None)
         if not isinstance(options, dict):
@@ -307,14 +346,18 @@ class H3TurboSchedule:
             "lora_name": lora_name if loads_here else None,
             "lora_strength": lora_strength if loads_here else None,
             "lora_loaded_here": loads_here,
+            "additional_loras": [dict(item) for item in additional_loras],
+            "speed_cache": SPEED_CACHE_OFF,
         })
         options[TURBO_MARKER] = marker
         logger.info(
-            "H3-Myang Turbo: %s | lora=%s | strength=%s | shift video/audio=%.2f/%.2f | steps=%s | cache=%s",
+            "H3-Myang Turbo: %s | lora=%s | strength=%s | additional=%s | shift video/audio=%.2f/%.2f | steps=%s | cache=%s",
             spec["profile"], lora_name if loads_here else "upstream",
             lora_strength if loads_here else "upstream",
+            ", ".join("%s@%s" % (item["name"], item["strength"])
+                      for item in additional_loras) or "none",
             spec["shift_video"], spec["shift_audio"],
-            "/".join(str(x) for x in spec["allowed_steps"]), str(speed_cache))
+            "/".join(str(x) for x in spec["allowed_steps"]), SPEED_CACHE_OFF)
         return (patched, spec["recommended_steps"],
                 spec["shift_video"], spec["shift_audio"])
 

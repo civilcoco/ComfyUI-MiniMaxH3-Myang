@@ -127,6 +127,23 @@ def _latin_syllables(text: str) -> int:
     return total
 
 
+def budget_units(seconds: float, tone: str = DEFAULT_TONE,
+                 fastest: bool = True) -> int:
+    """Spoken beats that fit in a window, at the fastest or slowest delivery.
+
+    ``fastest=True`` is the hard ceiling: more beats than this cannot be
+    articulated in the window at all. ``fastest=False`` is the comfortable fill
+    for a window that would otherwise sit silent.
+
+    Exported because the split prompt hands the writer this ceiling up front and
+    :func:`audit` asks for compression against the same number, so the
+    instruction and the check cannot drift apart.
+    """
+    low, high = SPEECH_RATES.get(str(tone), SPEECH_RATES[DEFAULT_TONE])
+    rate = high if fastest else low
+    return max(1, int(max(0.0, float(seconds)) * rate))
+
+
 def infer_tone(context: str) -> str:
     """Pick a speaking rate bracket from the prose around a line.
 
@@ -224,9 +241,9 @@ def audit(
                 "detail": (
                     f"台词 {block['index']}（{block['tone']}，{block['units']}字）最快也要 "
                     f"{block['min_seconds']:.2f} 秒，超过可用的 {window:.2f} 秒。"
-                    f"建议压缩到 {max(1, int(window * block['rate_max']))} 字以内"
+                    f"建议压缩到 {budget_units(window, block['tone'])} 字以内"
                 ),
-                "suggest_units": max(1, int(window * block["rate_max"])),
+                "suggest_units": budget_units(window, block["tone"]),
             })
         elif block["max_seconds"] < window * 0.35 and window >= 2.0:
             issues.append({
@@ -236,9 +253,10 @@ def audit(
                 "detail": (
                     f"台词 {block['index']}（{block['tone']}，{block['units']}字）只需 "
                     f"{block['max_seconds']:.2f} 秒，而该镜头有 {window:.2f} 秒，画面会长时间无声。"
-                    f"可扩充到约 {max(1, int(window * block['rate_min']))} 字，或补充动作/环境音"
+                    f"可扩充到约 {budget_units(window, block['tone'], fastest=False)} 字，或补充动作/环境音"
                 ),
-                "suggest_units": max(1, int(window * block["rate_min"])),
+                "suggest_units": budget_units(
+                    window, block["tone"], fastest=False),
             })
 
     spoken = round(sum(block["min_seconds"] for block in blocks), 2)

@@ -6,13 +6,11 @@ tests/__pycache__/
 *.log
 *.tmp
 *.bak
-skills/_skill_index.json
-skills/_skill_memory.json
+skills/
 .github/
-.gitattributes
-.gitignore
-docs/
+docs/research/
 tests/
 tools/
 CHANGELOG.md
 CONTRIBUTING.md
+SECURITY.md

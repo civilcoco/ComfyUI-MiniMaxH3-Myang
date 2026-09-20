@@ -5,8 +5,10 @@
 export const PROGRESS_PHASE = {
     sample1: {label: "一采采样", steps: true},
     drift: {label: "漂移校正", steps: false},
+    motion: {label: "高速动作修复", steps: true},
     refine_prep: {label: "二采准备", steps: false},
     sample2: {label: "二采采样", steps: true},
+    face: {label: "小脸精修", steps: true},
     finalizing: {label: "解码分段", steps: false},
     segments: {label: "完成剩余分段", steps: false, global: true},
     assembling: {label: "合并分段", steps: false, global: true},
@@ -42,6 +44,8 @@ export function createProgressState(options = {}) {
         prompt: "",
         brief: "",
         refining: !!options.refining,
+        motionRepair: !!(options.motionRepair ?? options.motion_repair),
+        faceRefine: !!(options.faceRefine ?? options.face_refine),
         correcting: !!options.correcting,
         error: "",
         progressSeen: false,
@@ -64,6 +68,8 @@ export function ensureProgressState(state) {
     state.maxSeenSegment = Math.max(0, Number(state.maxSeenSegment) || 0);
     state.maxPercent = Math.max(0, Number(state.maxPercent) || 0);
     state.outOfOrder = !!state.outOfOrder;
+    state.motionRepair = !!state.motionRepair;
+    state.faceRefine = !!state.faceRefine;
     return state;
 }
 
@@ -80,15 +86,24 @@ function eventPhase(state, detail, stage) {
     if (stage === "sampling") {
         const pass = String(detail?.pass_label || "sample1");
         if (pass.startsWith("sample2")) return "sample2";
+        if (pass === "motion") return "motion";
+        if (pass === "face") return "face";
         return "sample1";
     }
     if (stage === "sampled") {
         return state.correcting ? "drift"
-            : state.refining ? "refine_prep" : "finalizing";
+            : state.motionRepair ? "motion"
+                : state.refining ? "refine_prep"
+                    : state.faceRefine ? "face" : "finalizing";
+    }
+    if (stage === "motion_start") return "motion";
+    if (stage === "motion_refined") {
+        return state.refining ? "refine_prep" : state.faceRefine ? "face" : "finalizing";
     }
     if (stage === "drifted") return state.refining ? "refine_prep" : "finalizing";
     if (stage === "refine_start") return "refine_prep";
     if (stage === "refined") return "finalizing";
+    if (stage === "face_start" || stage === "face_refined") return "face";
     return null;
 }
 
@@ -97,16 +112,28 @@ function eventFraction(state, detail, stage) {
         const ratio = clamp01(Number(detail?.step || 0) / positiveInt(detail?.step_total, 1));
         const pass = String(detail?.pass_label || "sample1");
         if (pass.startsWith("sample2")) return 0.60 + ratio * 0.25;
+        if (pass === "motion") {
+            const end = state.refining ? 0.55 : state.faceRefine ? 0.75 : 0.85;
+            return 0.40 + ratio * (end - 0.40);
+        }
+        if (pass === "face") return 0.85 + ratio * 0.12;
         return ratio * 0.40;
     }
     if (stage === "sampled") {
         if (state.correcting) return 0.40;
+        if (state.motionRepair) return 0.40;
         return state.refining ? 0.50 : 0.85;
+    }
+    if (stage === "motion_start") return 0.40;
+    if (stage === "motion_refined") {
+        return state.refining ? 0.55 : state.faceRefine ? 0.75 : 0.85;
     }
     if (stage === "drifted" || stage === "refine_start") {
-        return state.refining ? 0.50 : 0.85;
+        return state.refining ? (state.motionRepair ? 0.55 : 0.50) : 0.85;
     }
     if (stage === "refined") return 0.85;
+    if (stage === "face_start") return 0.85;
+    if (stage === "face_refined") return 0.98;
     if (stage === "done") return 1;
     return null;
 }

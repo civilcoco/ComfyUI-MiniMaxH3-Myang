@@ -17,4 +17,5 @@ pwsh tools\run_tests.ps1 -ComfyRoot "D:\path\to\ComfyUI"
 ```
 
 If ComfyUI uses a dedicated Python environment, also pass its interpreter with
-`-Python "D:\path\to\python.exe"`.
+`-Python "D:\path\to\python.exe"`. Tests that need an optional enhancement pack
+(ComfyUI-MAINodes, ComfyUI-H3-FaceRefine) print `SKIP` when it is absent.

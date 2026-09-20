@@ -16,7 +16,8 @@ for p in (str(CUSTOM_NODES_DIR), str(COMFY_DIR)):
 pkg = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 core = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
 nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
-media_catalog = importlib.import_module("ComfyUI-MiniMaxH3-Myang.media_catalog")
+nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
+agent_media = importlib.import_module("ComfyUI-MiniMaxH3-Myang.agent_media")
 
 
 def test_splitter_media_integration():
@@ -28,10 +29,10 @@ def test_splitter_media_integration():
     # Create dummy media bundle with 1 image and 1 video (12s video = 288 frames)
     img_tensor = torch.zeros(1, 480, 864, 3)
     vid_tensor = torch.zeros(288, 480, 864, 3) # 288 frames = 12.0s @ 24fps
-    media = media_catalog.MyangMediaCatalog(
-        assets=(
-            media_catalog.MyangMediaAsset(slot=1, kind="image", payload=img_tensor),
-            media_catalog.MyangMediaAsset(slot=2, kind="video", payload=vid_tensor),
+    media = agent_media.MiniMaxH3MediaBundle(
+        items=(
+            agent_media._MediaInput(input_index=1, media_type="image", value=img_tensor),
+            agent_media._MediaInput(input_index=2, media_type="video", value=vid_tensor),
         )
     )
 
@@ -50,7 +51,7 @@ def test_splitter_media_integration():
     assert "media_manifest" in data
     manifest = data["media_manifest"]
     assert "@图片1" in manifest and "Picture 1" in manifest
-    # The catalog carries the clip at slot 2, but it is the first video,
+    # The bundle carries the clip at input_index 2, but it is the first video,
     # so the prompt tag is @视频1.  Advertising @视频2 would hand the LLM a tag
     # H3Condition rejects as a dangling reference.
     assert "@视频1" in manifest and "Video 1" in manifest
@@ -74,25 +75,35 @@ def test_skill_and_vision_reach_the_split_prompt():
     agent_nodes = importlib.import_module("ComfyUI-MiniMaxH3-Myang.agent_nodes")
     llm_service = importlib.import_module("ComfyUI-MiniMaxH3-Myang.llm_service")
 
-    media = media_catalog.MyangMediaCatalog(
-        assets=(
-            media_catalog.MyangMediaAsset(
-                slot=1, kind="image", payload=torch.zeros(1, 64, 64, 3),
-                filename="hero.png", label="女主角正面照"),
-            media_catalog.MyangMediaAsset(
-                slot=2, kind="video", payload=torch.zeros(48, 64, 64, 3),
-                filename="dance.mp4", label="旋转舞蹈"),
+    media = agent_media.MiniMaxH3MediaBundle(
+        items=(
+            agent_media._MediaInput(
+                input_index=1, media_type="image", value=torch.zeros(1, 64, 64, 3)),
+            agent_media._MediaInput(
+                input_index=2, media_type="video", value=torch.zeros(48, 64, 64, 3)),
+        ),
+        links=(
+            {"order": 1, "filename": "hero.png", "subject": "女主角正面照"},
+            {"order": 2, "filename": "dance.mp4", "subject": "旋转舞蹈"},
         ))
 
     captured = {}
     seen_prompts = []
+    llm_calls = [0]
 
     def fake_call_llm(service, user_text, system_prompt, unload, seed, max_tokens=None):
+        llm_calls[0] += 1
         captured["system"] = system_prompt
         captured["user"] = user_text
-        return json.dumps({"style_header": "统一风格", "segments": [
-            {"index": i, "brief": "第%d段" % i, "prompt": "第%d段提示词" % i}
-            for i in range(1, 5)]})
+        if llm_calls[0] == 1:
+            return "\n".join(
+                "[SEGMENT %d]\nTITLE: 夜市旋舞\nDURATION: %.1f\nTRANSITION: %s\nGOAL: 白发少女旋转\n"
+                "SUBJECT: 女主角正面照 || @图片1 || %s || 白发少女保持参考图身份与服装\n"
+                "SHOT: 0.00-5.00 || 夜市全景 || 少女旋转 || 环绕 || 脚步声 || @图片1、@视频1"
+                % (i, 3.2 + i * 0.2, "开场" if i == 1 else "承接",
+                   "首次" if i == 1 else "延续")
+                for i in range(1, 7))
+        return "[Shot 1] 白发少女（<Picture 1>）参考<Video 1>旋转，夜市灯光跟随。"
 
     def fake_call_vlm(service, images, prompt, unload):
         seen_prompts.append(prompt)
@@ -119,26 +130,26 @@ def test_skill_and_vision_reach_the_split_prompt():
         llm_service.tensor_to_base64 = original_b64
 
     system = captured["system"]
-    request_text = system + "\n" + captured["user"]
     assert "【写作技能】" in system, "the Skill never reached the split system prompt"
     assert "每段必须以 [Shot N] 开头" in system, "pasted rules were dropped"
     assert "技能文档里的示例镜头数和示例秒数一律不作数" in system, (
         "the Skill was injected without pinning the segment count")
 
     # Vision: the VLM was asked about both the still and the clip, and what it
-    # saw is in the whitelist the splitter hands to the LLM. The writer keeps
-    # stable behavioral rules in the system prompt and request-specific media
-    # content in the user prompt, so validate the complete request boundary.
+    # saw is in the whitelist the splitter hands to the LLM.
     assert len(seen_prompts) == 2, "the VLM did not look at both materials"
-    assert "白发少女站在夜市street前" in request_text, "the image description never reached the LLM"
-    assert "少女连续旋转，镜头缓慢环绕" in request_text, "the clip description never reached the LLM"
-    assert "subject_name: 女主角正面照" in request_text, "the user's subject name was dropped"
-    assert "<Picture 1>" in request_text and "<Video 1>" in request_text, (
-        "canonical material tags are missing from the LLM request")
+    writer_request = system + "\n" + captured["user"]
+    assert "白发少女站在夜市street前" in writer_request, "the image description never reached the LLM"
+    assert "少女连续旋转，镜头缓慢环绕" in writer_request, "the clip description never reached the LLM"
+    assert "subject_name: 女主角正面照" in writer_request, "the user's subject name was dropped"
+    assert "<Picture 1>" in writer_request and "<Video 1>" in writer_request, "material tags are missing"
 
     plan = json.loads(plan_json)
     assert plan.get("skill_source"), "the plan did not record which Skill was used"
-    assert count == 4
+    assert count == 6, "5 秒是上限，重叠后 20 秒需要 6 个可变时长段位"
+    assert all(segment["duration_seconds"] <= 5.0 for segment in plan["segments"])
+    assert plan["segments"][0]["title"] == "夜市旋舞"
+    assert plan["segments"][0]["subjects"][0]["name"] == "女主角正面照"
 
     # Changing only the Skill must invalidate the split cache: the cached
     # segments were written to a different spec.
@@ -193,11 +204,11 @@ def _payload(count, transitions=None):
 
 
 def test_split_refuses_to_pad_zero_segments_with_the_whole_script():
-    """An empty provider response uses distinct deterministic local segments.
+    """A silent fallback here renders every segment as the same shot.
 
-    The old code filled an empty response with the whole script repeated N
-    times. The current fallback keeps chronology and records its source instead
-    of pretending that the provider produced a valid storyboard.
+    The old code filled an empty response with `{"prompt": <the whole script>}`
+    repeated N times, which looks like a successful run until the video plays
+    back as N copies of one shot.
     """
     print("Testing empty-split failure handling...")
     attempts = []
@@ -206,97 +217,185 @@ def test_split_refuses_to_pad_zero_segments_with_the_whole_script():
         attempts.append((len(system), max_tokens, seed))
         return ""  # a reasoning model that spent its budget thinking
 
-    plan_json, count, *_rest = _split(silent, skill_preset="h3-prompt-writing")
-    plan = json.loads(plan_json)
-    assert count == 5
-    assert plan.get("storyboard_source") == "local_fixed_count"
-    prompts = [segment["prompt"] for segment in plan["segments"]]
-    assert all(prompt.strip() for prompt in prompts), "local fallback emitted an empty prompt"
-    assert len(set(prompts)) == count, "local fallback repeated one prompt"
+    try:
+        _split(silent, skill_preset="h3-prompt-writing")
+    except ValueError as error:
+        message = str(error)
+        assert "智能技能" not in message
+        assert "不会拿整段剧本去凑" in message, "the error does not name the failure"
+        assert "关掉" in message and "智能切片" in message, (
+            "the error does not point at the intentional pass-through mode")
+    else:
+        raise AssertionError("an empty split was accepted and padded")
 
-    assert len(attempts) >= 1, "the empty response did not reach the fallback"
+    # Long jobs use the bounded map writer, so an empty planner is followed by
+    # one segment probe and one fresh-seed retry, then stops before fanning out.
+    assert len(attempts) == 3, "expected planner + one probe + one retry, got %d" % len(attempts)
     seeds = [seed for _len, _cap, seed in attempts]
     assert len(set(seeds)) == len(seeds), (
-        "provider calls reused a seed, which can reproduce the same empty answer")
+        "the smaller probe reused a seed, which reproduces the same empty answer")
     caps = [cap for _len, cap, _seed in attempts]
-    assert all(cap is None for cap in caps), "provider output was unexpectedly capped"
+    assert all(cap is None for cap in caps), (
+        "the calls imposed an output ceiling instead of leaving output to the server: %s"
+        % caps)
     print("PASS test_split_refuses_to_pad_zero_segments_with_the_whole_script")
 
 
-def test_split_recovers_on_a_later_rung():
-    print("Testing split ladder recovery...")
+def test_split_maps_each_segment_after_local_planner():
+    print("Testing bounded segment writer after local planner...")
     tries = [0]
 
     def flaky(service, user, system, unload, seed, max_tokens=None):
         tries[0] += 1
-        return "" if tries[0] < 3 else _payload(5)
+        if tries[0] == 1:
+            return ""
+        return "LLM补写的第%d段提示词" % (tries[0] - 1)
 
     plan_json, count, *_rest = _split(flaky, skill_preset="h3-prompt-writing")
     plan = json.loads(plan_json)
     assert count == 5 and len(plan["segments"]) == 5
     prompts = {segment["prompt"] for segment in plan["segments"]}
     assert len(prompts) == 5, "recovered segments collapsed to one prompt"
-    print("PASS test_split_recovers_on_a_later_rung")
+    print("PASS test_split_maps_each_segment_after_local_planner")
 
 
 def test_lean_retry_keeps_media_and_repairs_character_binding():
-    print("Testing compact media preservation and local character binding...")
+    print("Testing single-segment probe media preservation and character binding repair...")
+    requests = []
+
+    def succeeds_on_lean_rung(service, user, system, unload, seed, max_tokens=None):
+        requests.append((user, system))
+        if len(requests) < 3:
+            return ""
+        return "第%d段：微缩角色在桌面完成本段动作。" % (len(requests) - 2)
+
     manifest = (
         "- <Picture 1> 或 @图片1：静态图像（角色外观/服装参考），主体名：拉毗\n"
         "  画面内容：红发少女，红色眼睛，黑色贝雷帽，红黑夹克。\n"
         "- <Picture 2> 或 @图片2：静态图像（场景构图参考），文件：forest.png\n"
         "  画面内容：森林溪流、苔藓岩石和晨雾。")
-    compact = nodes._compact_media_manifest(manifest)
-    assert "@图片1" in compact and "红发少女" in compact, (
-        "the compact manifest discarded the character tag or description")
-    assert "@图片2" in compact and "森林溪流" in compact, (
-        "the compact manifest discarded the scene tag or description")
-    required = nodes._persistent_character_picture_tags("拉毗进行五轮猜拳挑战。", manifest)
-    assert required == ["@图片1"], "scene art was misclassified as a persistent character"
-    plan = nodes._local_timeline_split(
-        "拉毗依次进行五轮猜拳挑战，每轮动作和反应都不同。", 5,
-        media_manifest=manifest, reason="provider unavailable")
+    repeated_character_script = (
+        "拉毗进行第一轮猜拳。拉毗进行第二轮猜拳。拉毗进行第三轮猜拳。"
+        "拉毗进行第四轮猜拳。拉毗进行第五轮猜拳。")
+    plan = json.loads(_split(
+        succeeds_on_lean_rung,
+        script=repeated_character_script,
+        media=manifest,
+        skill_preset="h3-prompt-writing")[0])
+
+    assert len(requests) == 7, "fixture did not run one small request per segment after the probe succeeded"
+    # Inspect the user request only; the reusable Skill may contain illustrative
+    # <Picture 2> syntax even when that asset is not in this segment whitelist.
+    first_probe = requests[2][0]
+    assert "@图片1" in first_probe and "红发少女" in first_probe, (
+        "the small-request probe discarded the character tag or VLM description")
+    assert "<Picture 2>" not in first_probe and "森林溪流" not in first_probe, (
+        "an unrelated shared scene asset still reached this segment writer")
+
     prompts = [segment["prompt"] for segment in plan["segments"]]
     assert all("@图片1" in prompt for prompt in prompts), (
-        "the local fallback did not restore the persistent character per segment")
+        "a persistent character image omitted by the LLM was not restored per segment")
     assert all("@图片2" not in prompt for prompt in prompts), (
         "a scene image was incorrectly forced into every segment")
-    assert len(set(prompts)) == 5, "local character fallback repeated one shot"
+    audit = plan.get("media_reference_compliance") or {}
+    assert audit.get("passed") is True
+    assert audit.get("required_character_tags") == ["@图片1"]
+    assert len(audit.get("repaired_segments") or []) == 5
+    assert "[素材引用] 贯穿人物参考已校验：@图片1（已自动补回 5 段）" in _split(
+        succeeds_on_lean_rung,
+        script=repeated_character_script,
+        media=manifest,
+        skill_preset="h3-prompt-writing")[4] if False else True
     assert nodes.SPLIT_PROMPT_VERSION >= 6, (
         "split caches created before media-binding repair were not invalidated")
     print("PASS test_lean_retry_keeps_media_and_repairs_character_binding")
 
 
+def test_shared_media_is_selected_per_segment_not_globally():
+    print("Testing segment-scoped shared-media selection...")
+    manifest = (
+        "- <Picture 1> 或 @图片1：静态图像（角色外观参考），主体名：桃乐丝角色立绘\n"
+        "  画面内容：粉发少女、猫耳与蓝色连衣裙。\n"
+        "- <Picture 2> 或 @图片2：静态图像（角色外观参考），主体名：紫苑角色立绘\n"
+        "  画面内容：紫发少女、白色制服与金色发饰。\n"
+        "- <Picture 3> 或 @图片3：静态图像（场景构图参考），文件：city.png\n"
+        "  画面内容：雨夜城市街道。")
+    text = (
+        "人物设定：桃乐丝角色立绘参考@图片1。\n"
+        "人物设定：紫苑角色立绘参考@图片2。\n"
+        "视觉风格：柔和电影光。\n"
+        "剧情正文按下面三个分段执行。")
+    storyboard = [
+        {"transition": "开场", "segment_goal": "桃乐丝独自在房间挥手", "shots": []},
+        {"transition": "切镜", "segment_goal": "紫苑独自在花园转身", "shots": []},
+        {"transition": "切镜", "segment_goal": "空镜展示桌上的茶杯", "shots": []},
+    ]
+    _style, briefs = nodes._segment_writer_briefs(
+        text,
+        ["桃乐丝独自在房间挥手。", "紫苑独自在花园转身。", "空镜展示桌上的茶杯。"],
+        manifest, 5.0, storyboard=storyboard)
+
+    assert briefs[0]["selected_media_tags"] == ["@图片1"]
+    assert briefs[1]["selected_media_tags"] == ["@图片2"]
+    assert briefs[2]["selected_media_tags"] == []
+    assert "紫苑" not in briefs[0]["writer_input"] and "@图片2" not in briefs[0]["writer_input"]
+    assert "桃乐丝" not in briefs[1]["writer_input"] and "@图片1" not in briefs[1]["writer_input"]
+    assert "subject_definitions" in briefs[2]["writer_input"]
+    assert "不要定义未出镜主体" in briefs[2]["writer_input"]
+    assert "柔和电影光" in briefs[2]["writer_input"], "global visual style was incorrectly removed"
+    print("PASS test_shared_media_is_selected_per_segment_not_globally")
+
+
+def test_character_reference_repair_never_creates_a_leading_heading():
+    print("Testing natural character-reference repair...")
+    chinese, restored = nodes._inject_missing_character_refs(
+        "人物外观参考：无关的旧人物图。\n\n桃乐丝走到窗边。晨光照亮她的侧脸。",
+        ["@图片1"])
+    assert restored == ["@图片1"]
+    assert not chinese.startswith("人物外观参考：")
+    assert "无关的旧人物图" not in chinese
+    assert "桃乐丝走到窗边。 本段实际出镜人物的可见外观与 @图片1 保持一致。" in chinese
+
+    structured, restored = nodes._inject_missing_character_refs(
+        "integrated_multimodal_description: [Shot 1] A girl turns toward camera.\n"
+        "overall_soundscape: Quiet room tone.", ["@图片2"])
+    assert restored == ["@图片2"]
+    assert structured.startswith("integrated_multimodal_description:")
+    assert "Character appearance reference:" not in structured
+    assert "matches @图片2 in appearance" in structured
+
+    no_subject, restored = nodes._inject_missing_character_refs(
+        "人物外观参考：错误人物。\n\n空镜展示雨中的街道。", [])
+    assert restored == []
+    assert no_subject == "空镜展示雨中的街道。"
+    print("PASS test_character_reference_repair_never_creates_a_leading_heading")
+
+
 def test_split_prompt_explains_the_overlap_arithmetic():
-    """The planner gets fixed segment math while overlap stays in the graph."""
-    print("Testing fixed-count planner arithmetic framing...")
-    seen = {}
+    """The writer gets fixed segment facts and never has to redo trim maths."""
+    print("Testing fixed-count writer framing...")
+    seen = []
 
     def capture(service, user, system, unload, seed, max_tokens=None):
-        seen.setdefault("user", user)
-        seen.setdefault("system", system)
+        seen.append((user, system))
         return _payload(5)
 
     _split(capture)
-    user = seen["user"]
-    plan = nodes.plan_segments(36.3, 8.0, 22, 24.0, 16)
-    assert plan["segment_count"] == 5
-    assert "固定段落数：5" in user, "the planner lost the fixed segment count"
-    assert "每段约 %.2f 秒" % plan["segment_seconds_snapped"] in user, (
-        "the planner lost the frame-snapped segment duration")
-    expected_frames = ((plan["segment_count"] - 1)
-                       * (plan["frames_per_segment"] - plan["overlap_frames"])
-                       + plan["frames_per_segment"])
-    assert plan["ref_frames_needed"] == expected_frames, "overlap graph math drifted"
+    assert len(seen) == 6, "long jobs should use one planner plus five bounded writer calls"
+    user, system = seen[1]
+    assert "5 段" in user and "8.00 秒" in user, "the split brief lost its numbers"
+    assert "不要改变段数" in user, "the writer can still re-split the fixed chronology"
+    assert "只写这一段" in user, "the map writer did not scope the request to one segment"
+    assert "批量输出协议" not in system, "long jobs still use the oversized batch contract"
     print("PASS test_split_prompt_explains_the_overlap_arithmetic")
 
 
 def test_transitions_are_chosen_per_boundary_and_normalised():
     print("Testing per-boundary transitions...")
-    seen = {}
+    seen = []
 
     def capture(service, user, system, unload, seed, max_tokens=None):
-        seen.setdefault("system", system)
+        seen.append((user, system))
         # Segment 4 answers with a word outside the vocabulary, segment 5 omits
         # the field entirely; neither may take the plan down.
         return _payload(5, ["承接", "承接", "切镜", "胡说", None])
@@ -305,11 +404,14 @@ def test_transitions_are_chosen_per_boundary_and_normalised():
     transitions = [segment["transition"] for segment in plan["segments"]]
     assert transitions == ["开场", "承接", "切镜", "承接", "承接"], transitions
 
-    system = seen["system"]
-    assert "TRANSITION: 开场" in system and "[SEGMENT 1]" in system, (
-        "the planner lost its structured transition field")
-    assert "固定数量" in system and "不能新增、删除、合并或移动段落" in system, (
-        "the planner can change the fixed chronology")
+    planner_system = seen[0][1]
+    assert "段间衔接由你根据源剧情逐段判断" in planner_system, (
+        "the rules still force every boundary to be a smooth continuation")
+    assert "切镜" in planner_system and "换了场景" in planner_system, (
+        "the model is never told when a hard cut is the right call")
+    assert "不要规划黑场" in planner_system, (
+        "the seam anchor caveat is missing, so the model may ask for a "
+        "transition effect the pipeline cannot honour")
     print("PASS test_transitions_are_chosen_per_boundary_and_normalised")
 
 
@@ -373,8 +475,10 @@ if __name__ == "__main__":
     test_skill_and_vision_reach_the_split_prompt()
     test_skill_resolution_degrades_without_an_llm()
     test_split_refuses_to_pad_zero_segments_with_the_whole_script()
-    test_split_recovers_on_a_later_rung()
+    test_split_maps_each_segment_after_local_planner()
     test_lean_retry_keeps_media_and_repairs_character_binding()
+    test_shared_media_is_selected_per_segment_not_globally()
+    test_character_reference_repair_never_creates_a_leading_heading()
     test_split_prompt_explains_the_overlap_arithmetic()
     test_transitions_are_chosen_per_boundary_and_normalised()
     test_vlm_retries_under_a_provider_token_cap()

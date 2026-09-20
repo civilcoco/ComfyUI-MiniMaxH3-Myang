@@ -26,13 +26,14 @@ jobs:
           node-version: "22"
 
       - name: Validate release contents
-        run: python tools/release_audit.py
+        run: python tools/release_audit.py --strict-local --strict-private
+
+      - name: Validate native media boundary
+        run: python tools/audit_native_media.py
 
       - name: Compile Python sources
         run: python -m compileall -q .
 
       - name: Run frontend structure regressions
         run: |
-          node --experimental-default-type=module tests/test_storyboard_cards.mjs
-          node --experimental-default-type=module tests/test_progress_state.mjs
-          node --experimental-default-type=module tests/test_llm_config_ui.mjs
+          for test in tests/test_*.mjs; do node "$test"; done

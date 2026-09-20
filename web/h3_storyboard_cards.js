@@ -1,6 +1,8 @@
 export const STORYBOARD_CARD_FORMAT = "minimax-h3-myang-director-storyboard";
 export const STORYBOARD_CARD_VERSION = 1;
 
+import {normalizeSegmentLayers} from "./h3_prompt_layers.js";
+
 const MAX_CARDS = 256;
 
 function text(value) {
@@ -16,7 +18,7 @@ function material(asset, index) {
     const kind = ["image", "video", "audio"].includes(asset?.kind) ? asset.kind : "image";
     const name = text(file.name).trim();
     if (!name) return null;
-    return {
+    const result = {
         kind,
         role: kind === "video" && asset?.role === "action" ? "action" : "reference",
         label: text(asset?.label || name || `${kind} ${index + 1}`),
@@ -26,6 +28,12 @@ function material(asset, index) {
             type: "input",
         },
     };
+    if (["auto", "manual"].includes(asset?.reference_weight_mode)) {
+        result.reference_weight_mode = asset.reference_weight_mode;
+        result.reference_weight = Math.max(.25, Math.min(3,
+            Number(asset?.reference_weight) || 1));
+    }
+    return result;
 }
 
 function materials(source) {
@@ -35,7 +43,8 @@ function materials(source) {
 }
 
 function exportedCard(shot, index) {
-    return {
+    const layers = normalizeSegmentLayers(shot?.layers);
+    const card = {
         order: index + 1,
         enabled: shot?.enabled !== false,
         duration_seconds: duration(shot?.duration_seconds),
@@ -48,6 +57,11 @@ function exportedCard(shot, index) {
         material_policy: shot?.asset_mode === "叠加全局素材" ? "叠加全局素材" : "仅本镜头",
         materials: materials(shot?.assets),
     };
+    // Optional by design: a card that was never layered writes no key, and an
+    // older build reading a layered file falls back to the flat prompt, which is
+    // always the composed equivalent. That keeps the format version stable.
+    if (layers) card.layers = layers;
+    return card;
 }
 
 export function createStoryboardCardDocument({shots, globalAssets, title, plan} = {}) {
@@ -75,7 +89,8 @@ function importedCard(card, index, stamp) {
     if (!card || typeof card !== "object" || Array.isArray(card)) {
         throw new Error(`第 ${index + 1} 张分镜卡不是有效对象`);
     }
-    return {
+    const layers = normalizeSegmentLayers(card.layers);
+    const shot = {
         id: `shot_import_${stamp}_${index + 1}`,
         enabled: card.enabled !== false,
         duration_seconds: duration(card.duration_seconds),
@@ -90,6 +105,8 @@ function importedCard(card, index, stamp) {
             id: `${asset.kind}_${stamp}_${index + 1}_${assetIndex + 1}`,
         })),
     };
+    if (layers) shot.layers = layers;
+    return shot;
 }
 
 export function parseStoryboardCardDocument(source) {

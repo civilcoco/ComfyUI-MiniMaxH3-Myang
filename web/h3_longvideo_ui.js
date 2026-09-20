@@ -1,6 +1,7 @@
 // 沐阳 H3 · 长视频节点的提示词编辑器
 //
-// The prompt is plain text the whole way down -- "@图片1" mentions and "<d>台词</d>" blocks
+// The prompt is plain text the whole way down -- "@图片1" mentions and
+// "<d>台词</d>" blocks
 // are exactly what the H3 sampler already parses -- so this is purely a nicer
 // way to look at and write that text.
 //
@@ -20,7 +21,7 @@ import { api } from "../../scripts/api.js";
 
 const NODE = "H3LongVideo";
 const DETAIL_NODE = "H3DetailSettings";
-const AGENT_LINKS = "myang_h3_asset_sources_v2";
+const AGENT_LINKS = "minimax_h3_agent_media_connections";
 const PREVIEW_PROP = "myh3_upstream_prompt";
 const TEXT_PROP = "myh3_prompt";
 
@@ -30,7 +31,7 @@ const GLYPH = { 图片: "▣", 视频: "▶", 音频: "♪" };
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|avif)$/i;
 const VIDEO_EXT = /\.(mp4|webm|mov|mkv|avi|m4v)$/i;
 
-// Same grammar the sampler accepts: editor mentions (@图片1) and official tags (<Picture 1>).
+// Same grammar the sampler accepts, supports both Easy Prompt (@图片1) and <Picture 1>
 const TAG_MAP = { picture: "图片", video: "视频", audio: "音频" };
 const MENTION_RE = /(@(图片|视频|音频)[ \t_]*(\d+)|<(Picture|Video|Audio)[ \t_]*(\d+)>)/gi;
 const DIALOGUE_RE = /<d>([\s\S]*?)<\/d>/g;
@@ -84,6 +85,7 @@ const DETAIL_LABELS = {
     latent_chunk_steps: "神经时间分块",
     passes: "二采轮数",
     seed_mode: "多轮种子",
+    reuse_condition: "复用一采条件",
 };
 
 let warned = false;
@@ -92,11 +94,12 @@ let warned = false;
 // 一段长视频内部细分为几个阶段，每个阶段在进度条上占一段权重。带 steps 的阶段
 // （一采/二采）还会用采样步数在该段内做精细插值，所以进度条能跟着步数走。
 const PHASE = {
-    sample1:    { start: 0.00, span: 0.40, label: "一采采样", steps: true  },
-    drift:      { start: 0.40, span: 0.10, label: "漂移校正", steps: false },
-    refine_prep:{ start: 0.50, span: 0.10, label: "二采准备", steps: false },
-    sample2:    { start: 0.60, span: 0.25, label: "二采采样", steps: true  },
-    finalizing: { start: 0.85, span: 0.15, label: "解码保存", steps: false },
+    sample1:    { start: 0.00, span: 0.32, label: "一采采样", steps: true  },
+    audio_refine:{start: 0.32, span: 0.16, label: "音频精修", steps: true  },
+    drift:      { start: 0.48, span: 0.08, label: "漂移校正", steps: false },
+    refine_prep:{ start: 0.56, span: 0.10, label: "二采准备", steps: false },
+    sample2:    { start: 0.66, span: 0.22, label: "二采采样", steps: true  },
+    finalizing: { start: 0.88, span: 0.12, label: "解码保存", steps: false },
 };
 // 一次队列通常只跑一个长视频任务，用全局变量记这次 run 的实时状态。
 let activeRun = null;
@@ -177,7 +180,9 @@ function applyProgress(node, d) {
         activeRun.stepMax = Number(d?.step_total || 0);
         // 根据 pass_label 确定当前是一采还是二采
         const passLabel = String(d?.pass_label || "sample1");
-        if (passLabel === "sample2") {
+        if (passLabel === "audio_refine") {
+            activeRun.phase = "audio_refine";
+        } else if (passLabel.startsWith("sample2")) {
             activeRun.phase = "sample2";
         } else {
             activeRun.phase = "sample1";
@@ -560,6 +565,7 @@ function refreshDetail(node) {
         latent_chunk_steps: neural,
         passes: sampling,
         seed_mode: sampling && Number(by.passes?.value || 1) > 1,
+        reuse_condition: sampling,
     })) setVisible(by[name], visible);
     if (node.__myh3DetailCustom === undefined) {
         node.__myh3DetailCustom = custom;
@@ -665,6 +671,7 @@ function refresh(node) {
     setVisible(by.prompt_mode, false);
     setVisible(by.media_prefix, false);
     setVisible(by.legacy_plan_padding, false);
+    setVisible(by.detail_refinement, false);
     setVisible(by.segment_prefix, by.save_segments?.value !== false);
 
     // This frontend materialises every widget as an input slot as well, so a
@@ -994,6 +1001,9 @@ app.registerExtension({
                     run_id: d.run_id,
                     total: d.total_segments || 1,
                     refining: !!d.refining,
+                    audioRefine: !!d.audio_refine,
+                    motionRepair: !!d.motion_repair,
+                    faceRefine: !!d.face_refine,
                     correcting: !!d.correcting,
                     seg: 1,
                     phase: "sample1",
@@ -1100,7 +1110,7 @@ app.registerExtension({
             // text rather than a guess.
             api.addEventListener("executed", guard((event) => {
                 const detail = event?.detail;
-                const payload = detail?.output?.myang_prompt;
+                const payload = detail?.output?.easy_prompt;
                 if (!payload) return;
                 const text = String(Array.isArray(payload) ? payload[0] : payload || "");
                 for (const node of app.graph?._nodes || []) {

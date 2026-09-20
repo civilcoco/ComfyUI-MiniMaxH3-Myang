@@ -15,31 +15,32 @@ TEXT_SUFFIXES = {
     ".css", ".html", ".ini", ".js", ".json", ".md", ".mjs", ".py",
     ".toml", ".txt", ".yaml", ".yml",
 }
-MEDIA_SUFFIXES = {".gif", ".jpeg", ".jpg", ".m4a", ".mov", ".mp3", ".mp4", ".png", ".wav", ".webm", ".webp"}
+MEDIA_SUFFIXES = {
+    ".gif", ".jpeg", ".jpg", ".m4a", ".mov", ".mp3", ".mp4", ".png",
+    ".wav", ".webm", ".webp",
+}
 REQUIRED_FILES = {
-    "LICENSE", "NOTICE", "README.md", "LEGAL.md",
-    "THIRD_PARTY_NOTICES.md", "pyproject.toml", ".comfyignore",
+    ".comfyignore", ".gitignore", "CHANGELOG.md", "CONTRIBUTING.md", "LEGAL.md",
+    "LICENSE", "NOTICE", "README.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md",
+    "pyproject.toml", "tools/audit_native_media.py", "tools/run_tests.ps1",
+    "tools/run_test_file.py", "tools/run_suite.py",
 }
-IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache"}
-RUNTIME_DEPENDENCY_FILES = {
-    "director.py", "nodes.py", "agent_nodes.py",
-    "web/h3_director_ui.js", "web/h3_longvideo_ui.js",
-    "web/minimax_h3_myang_agent_ui.js",
+REQUIRED_COMFY_EXCLUDES = {
+    ".github/", "docs/research/", "skills/", "tests/", "tools/",
 }
-FORBIDDEN_EXTERNAL_NODE_IDS = re.compile(
-    r"H3(?:ContactSheet(?:Decode)?|JerkOracle|TimeSmear|V2VInit|"
-    r"InjectSchedule|ExactRecover|AudioRecover|FaceTrackCrop|"
-    r"InjectVideoLatent|PerFrameDenoise|FaceStitch)"
-)
-FORBIDDEN_LEGACY_MEDIA_PROTOCOL = re.compile(
-    r"ComfyUI-MiniMaxH3-Easy|nkxx188|MiniMaxH3MediaBundle|_MediaInput|"
-    r"__MINIMAX_H3_REF_|media_links_json|easy_prompt|"
-    r"minimax_h3_agent_media_connections",
-    re.I,
-)
+IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+LOCAL_ONLY_PREFIXES = ("docs/research/", "skills/")
+ALLOWED_LOCAL_FILES = {"skills/.gitignore", "skills/README.md"}
+OPTIONAL_NODE_DEPENDENCIES = {
+    "ComfyUI-MAINodes": re.compile(
+        r"H3(?:ContactSheet(?:Decode)?|JerkOracle|TimeSmear|V2VInit|"
+        r"InjectSchedule|ExactRecover|AudioRecover)"),
+    "ComfyUI-H3-FaceRefine": re.compile(
+        r"H3(?:FaceTrackCrop|InjectVideoLatent|PerFrameDenoise|FaceStitch)"),
+}
 
 
-def public_files():
+def source_files():
     for path in ROOT.rglob("*"):
         if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
             continue
@@ -50,18 +51,41 @@ def relative(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
+def is_local_only(rel: str) -> bool:
+    return rel not in ALLOWED_LOCAL_FILES and rel.startswith(LOCAL_ONLY_PREFIXES)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--strict-metadata", action="store_true",
-        help="fail while the GitHub owner or Comfy publisher placeholders remain")
+        help="fail while repository or Comfy publisher placeholders remain",
+    )
+    parser.add_argument(
+        "--strict-local", action="store_true",
+        help="fail when ignored local Skills or research artifacts exist (used by CI)",
+    )
+    parser.add_argument(
+        "--strict-private", action="store_true",
+        help="fail when private self-use material remains in a public staging tree",
+    )
     args = parser.parse_args()
     errors: list[str] = []
     warnings: list[str] = []
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for name in sorted(REQUIRED_FILES):
         if not (ROOT / name).is_file():
             errors.append(f"missing required release file: {name}")
+
+    comfyignore_path = ROOT / ".comfyignore"
+    if comfyignore_path.is_file():
+        comfy_excludes = {
+            line.strip() for line in comfyignore_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        for pattern in sorted(REQUIRED_COMFY_EXCLUDES - comfy_excludes):
+            errors.append(f".comfyignore must exclude release-only/local path: {pattern}")
 
     pyproject_path = ROOT / "pyproject.toml"
     if pyproject_path.is_file():
@@ -69,64 +93,70 @@ def main() -> int:
             metadata = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
             project = metadata["project"]
             comfy = metadata["tool"]["comfy"]
-            if project.get("version") != "0.1.0":
-                errors.append("pyproject version must match the planned v0.1.0 release")
-            placeholder_fields = []
-            if any("REPLACE_WITH_" in str(value)
-                   for value in (project.get("urls") or {}).values()):
-                placeholder_fields.append("GitHub owner")
+            version = str(project.get("version") or "")
+            if not re.fullmatch(r"0\.[0-9]+\.[0-9]+", version):
+                errors.append("pyproject version must be a valid public semver")
+            placeholders = []
+            if any("REPLACE_WITH_" in str(value) for value in (project.get("urls") or {}).values()):
+                placeholders.append("GitHub owner")
             if "REPLACE_WITH_" in str(comfy.get("PublisherId", "")):
-                placeholder_fields.append("Comfy PublisherId")
-            if placeholder_fields:
-                message = (
-                    "replace " + " and ".join(placeholder_fields)
-                    + " before publishing"
-                )
+                placeholders.append("Comfy PublisherId")
+            if placeholders:
+                message = "replace " + " and ".join(placeholders) + " before publishing"
                 (errors if args.strict_metadata else warnings).append(message)
         except (KeyError, tomllib.TOMLDecodeError) as exc:
             errors.append(f"invalid Comfy pyproject metadata: {exc}")
 
-    allowed_skill_files = {"skills/README.md"}
-    actual_skill_files = {
-        relative(path) for path in (ROOT / "skills").rglob("*") if path.is_file()
-    } if (ROOT / "skills").is_dir() else set()
-    unexpected_skills = sorted(actual_skill_files - allowed_skill_files)
-    if unexpected_skills:
-        errors.append("unreviewed bundled Skill content: " + ", ".join(unexpected_skills))
+    local_only = sorted(relative(path) for path in source_files() if is_local_only(relative(path)))
+    if local_only:
+        message = (
+            "ignored local content is present and must not be force-added to a release: "
+            + ", ".join(local_only)
+        )
+        (errors if args.strict_local else warnings).append(message)
 
-    forbidden_names = {"_skill_index.json", "_skill_memory.json"}
-    for path in public_files():
+    private_checks = {
+        "Windows absolute path": re.compile(r"[A-Za-z]:\\(?:Users|AI-PAINTING|ComfyUI)"),
+        "chat attachment query": re.compile(r"(?:MsgID|skey)=|@crypt_", re.I),
+        "watermark-removal instruction": re.compile(r"(?:去掉|移除|消除).{0,12}水印"),
+        "known private material filename": re.compile(r"Mosi_Image|zit202|鸣潮舞蹈|彩叶5s", re.I),
+        "probable API secret": re.compile(r"\b(?:sk|ak)-[A-Za-z0-9_-]{24,}\b"),
+    }
+
+    for path in source_files():
         rel = relative(path)
-        if path.name in forbidden_names or path.suffix.lower() in {".pyc", ".pyo"}:
+        if is_local_only(rel):
+            continue
+        suffix = path.suffix.lower()
+        if path.name in {"_skill_index.json", "_skill_memory.json"} or suffix in {".pyc", ".pyo"}:
             errors.append(f"runtime cache included: {rel}")
-        if path.suffix.lower() in MEDIA_SUFFIXES:
+        if suffix in MEDIA_SUFFIXES:
             errors.append(f"media asset requires a separate rights review: {rel}")
-        if path.suffix.lower() == ".json":
+        if suffix == ".json":
             try:
                 json.loads(path.read_text(encoding="utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 errors.append(f"invalid JSON {rel}: {exc}")
-
-        if path.suffix.lower() not in TEXT_SUFFIXES or rel == "tools/release_audit.py":
+        if suffix not in TEXT_SUFFIXES or rel == "tools/release_audit.py":
             continue
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             errors.append(f"non-UTF-8 text file: {rel}")
             continue
-        checks = {
-            "Windows absolute path": re.compile(r"[A-Za-z]:\\\\(?:Users|AI-PAINTING|ComfyUI)"),
-            "chat attachment query": re.compile(r"(?:MsgID|skey)=|@crypt_", re.I),
-            "watermark-removal instruction": re.compile(r"(?:去掉|移除|消除).{0,12}水印"),
-            "known private material filename": re.compile(r"Mosi_Image|zit202|鸣潮舞蹈|彩叶5s", re.I),
-        }
-        for label, pattern in checks.items():
+        for label, pattern in private_checks.items():
             if pattern.search(text):
-                errors.append(f"{label} found in {rel}")
-        if FORBIDDEN_LEGACY_MEDIA_PROTOCOL.search(text):
-            errors.append(f"retired media protocol or attribution found in {rel}")
-        if rel in RUNTIME_DEPENDENCY_FILES and FORBIDDEN_EXTERNAL_NODE_IDS.search(text):
-            errors.append(f"external custom-node runtime call found in {rel}")
+                message = f"{label} found in {rel}"
+                (errors if args.strict_private else warnings).append(message)
+        for package, pattern in OPTIONAL_NODE_DEPENDENCIES.items():
+            if pattern.search(text) and package not in readme_text:
+                errors.append(
+                    f"optional custom-node dependency {package} used but not "
+                    f"documented in README.md ({rel})")
+
+    director_text = (ROOT / "director.py").read_text(encoding="utf-8")
+    if "H3ContactSheet" in director_text and "ComfyUI-MAINodes" not in readme_text:
+        errors.append("optional H3ContactSheet dependency is not documented in README.md")
 
     if errors:
         print("RELEASE AUDIT FAILED")

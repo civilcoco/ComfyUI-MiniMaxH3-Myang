@@ -20,8 +20,10 @@ package = importlib.import_module("ComfyUI-MiniMaxH3-Myang")
 anchors = importlib.import_module("ComfyUI-MiniMaxH3-Myang.anchors")
 compat = importlib.import_module("ComfyUI-MiniMaxH3-Myang.anchor_compat")
 core = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
+core_runtime = importlib.import_module("ComfyUI-MiniMaxH3-Myang.core")
 detail = importlib.import_module("ComfyUI-MiniMaxH3-Myang.detail")
 legacy = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
+native = importlib.import_module("ComfyUI-MiniMaxH3-Myang.nodes")
 seam = importlib.import_module("ComfyUI-MiniMaxH3-Myang.seam")
 turbo = importlib.import_module("ComfyUI-MiniMaxH3-Myang.turbo")
 
@@ -32,35 +34,45 @@ def check(condition, message):
 
 
 def test_registration_and_schema():
-    expected = {"H3AnchorContext", "H3AnchorKeyframe", "H3AnchorTrim",
+    expected = {"H3AnchorContext", "H3TailAnchorContext",
+                "H3AnchorKeyframe", "H3AnchorTrim",
                 "H3Condition", "H3LongVideo", "H3TurboSchedule",
-                "H3DetailRefine", "H3DetailSettings"}
+                "H3DetailRefine", "H3DetailSettings", "H3LatentIdentity"}
     check(expected.issubset(package.NODE_CLASS_MAPPINGS),
           "native node mappings are incomplete")
-    old_names = list(legacy._H3LongVideoInputs.INPUT_TYPES()["required"])
-    new_names = list(legacy.H3LongVideo.INPUT_TYPES()["required"])
+    check(legacy.FIRST_MEMORY_LEGACY_OFF in legacy.FIRST_MEMORY_PROFILES,
+          "legacy 一采显存策略 value no longer validates saved workflows")
+    legacy_policy = legacy.first_pass_memory_policy(
+        legacy.FIRST_MEMORY_LEGACY_OFF)
+    check(legacy_policy["cleanup"] is False
+          and legacy_policy["reserve_vram_gb"] == 0.0,
+          "legacy 一采显存策略 value does not preserve the unoptimized path")
+    base_names = list(native._H3LongVideoInputs.INPUT_TYPES()["required"])
+    new_names = list(native.H3LongVideo.INPUT_TYPES()["required"])
     # drift 校正与 anchor_schedule 已移除（回归 motion-context 全钉 + latent 无损）
     for gone in ("drift_method", "drift_strength", "anchor_schedule", "seam_blend_frames"):
         check(gone not in new_names, "H3LongVideo still exposes removed widget %s" % gone)
     expected_base = [
         "legacy_plan_padding" if n == "llm_service" else n
-        for n in old_names if n not in ("drift_method", "drift_strength")]
+        for n in base_names if n not in ("drift_method", "drift_strength")]
     check(new_names[:len(expected_base)] == expected_base,
           "H3LongVideo positional widgets (minus drift/LLM migration) changed order")
     check("llm_service" not in new_names,
           "H3LongVideo still owns an LLM service input")
-    check(legacy.H3LongVideo.INPUT_TYPES()["required"][
+    check(native.H3LongVideo.INPUT_TYPES()["required"][
               "legacy_plan_padding"][0] == "STRING",
           "legacy LLM position is not an inert migration string")
-    check(new_names[len(expected_base):] == ["save_raw_segments"],
-          "native detail widget was not appended after drift removal")
-    optional = legacy.H3LongVideo.INPUT_TYPES()["optional"]
+    check(new_names[len(expected_base):] == ["detail_refinement", "save_raw_segments"],
+          "native detail widgets were not appended after drift removal")
+    optional = native.H3LongVideo.INPUT_TYPES()["optional"]
     check("二采设置" in optional and "refine_model" not in optional and
           "detail_settings" not in optional,
           "H3LongVideo did not collapse detail controls into one Chinese input")
     check("二采模型" in detail.H3DetailSettings.INPUT_TYPES()["optional"],
           "detail controller has no Chinese base-model input")
-    check("ref_video" in core.H3Condition.INPUT_TYPES()["optional"],
+    check("continuous_sigma" in detail.H3DetailSettings.INPUT_TYPES()["required"],
+          "detail controller has no experimental continuous-Sigma switch")
+    check("ref_video" in core_runtime.H3Condition.INPUT_TYPES()["optional"],
           "H3Condition has no direct per-segment ref_video")
 
 
@@ -197,6 +209,49 @@ def test_overlap_latent_is_seeded_and_excluded_from_noise():
     check(torch.all(audio_mask == 1) and torch.equal(audio, target_audio),
           "visual-only anchor masking unexpectedly froze the audio stream")
 
+    detail_trim, detail_seeded = anchors.H3LatentOverlapSeed().apply(
+        latent={"samples": [target_video, target_audio]},
+        context_length="22",
+        context_latent={"samples": [source_video, source_audio]})
+    detail_video, detail_audio = detail_seeded["samples"].unbind()
+    detail_video_mask, detail_audio_mask = detail_seeded["noise_mask"].unbind()
+    check(detail_trim == 22
+          and torch.equal(detail_video[:, :, :7], source_video[:, :, -7:]),
+          "pass-2 overlap seed did not preserve the previous refined tail")
+    check(torch.count_nonzero(detail_video_mask[:, :, :7]) == 0
+          and torch.all(detail_video_mask[:, :, 7:] == 1),
+          "pass-2 overlap seed changed the zero-noise/new-frame mask boundary")
+    check(torch.equal(detail_audio, target_audio)
+          and torch.all(detail_audio_mask == 1),
+          "pass-2 visual overlap unexpectedly retained previous audio latent")
+
+
+def test_tail_motion_context_is_phase_safe_at_exact_io():
+    class FakeVAE:
+        def encode(self, _images):
+            return torch.full((1, 16, 7, 2, 2), 0.75)
+
+    target_video = torch.zeros(1, 16, 72, 2, 2)
+    target_audio = torch.zeros(1, 32, 2, 405)
+    latent = {"samples": [target_video, target_audio]}
+    context = torch.zeros(22, 32, 32, 3)
+
+    _conditioning, hidden, safe = anchors.H3TailAnchorContext().apply(
+        conditioning=[], vae=FakeVAE(), latent=latent,
+        context_frames=context, context_length="22", anchor_start_frame=214)
+    check(hidden == 29 and safe is latent,
+          "off-phase exact O point did not use the safe conditioning-only fallback")
+
+    _conditioning, hidden, seeded = anchors.H3TailAnchorContext().apply(
+        conditioning=[], vae=FakeVAE(), latent=latent,
+        context_frames=context, context_length="22", anchor_start_frame=221)
+    seeded_video, _seeded_audio = seeded["samples"].unbind()
+    video_mask, _audio_mask = seeded["noise_mask"].unbind()
+    check(hidden == 22 and torch.all(seeded_video[:, :, 65:] == 0.75),
+          "phase-aligned tail did not copy the MotionContext latent")
+    check(torch.count_nonzero(video_mask[:, :, 65:]) == 0,
+          "phase-aligned hidden tail still receives random noise")
+
 
 def test_seam_uses_matching_audio_window():
     prev_images = torch.zeros(6, 1, 1, 3)
@@ -262,21 +317,23 @@ def test_trim():
     expected_samples = round(102 / 24.0 * sample_rate)
     check(int(trimmed_audio["waveform"].shape[-1]) == expected_samples,
           "audio tail does not match delivered frames")
+
     short_audio = {
-        "waveform": torch.ones(1, 2, round((22 / 24.0) * sample_rate) + 1000),
+        "waveform": torch.ones(1, 2, 100000),
         "sample_rate": sample_rate,
     }
-    _, padded_audio = anchors.H3AnchorTrim().trim(
+    _short_images, padded_audio = anchors.H3AnchorTrim().trim(
         images, 22, audio=short_audio, fps=24.0)
-    check(int(padded_audio["waveform"].shape[-1]) == expected_samples,
-          "short audio tail was not padded to delivered video duration")
-    check(torch.count_nonzero(padded_audio["waveform"][..., 1000:]) == 0,
-          "short audio padding fabricated non-zero samples")
+    padded_waveform = padded_audio["waveform"]
+    check(int(padded_waveform.shape[-1]) == expected_samples,
+          "short audio was not padded to the delivered video duration")
+    check(torch.count_nonzero(padded_waveform[..., 56000:]) == 0,
+          "short audio tail padding is not silent")
 
 
-def _plan(count=2, overlap=22):
+def _plan(count=2, overlap=22, transitions=None):
     frames = 124
-    return json.dumps({
+    payload = {
         "segment_count": count,
         "frames_per_segment": frames,
         "segment_seconds_snapped": frames / 24.0,
@@ -284,25 +341,39 @@ def _plan(count=2, overlap=22):
         "overlap_frames": overlap,
         "total_seconds_actual": (frames + (count - 1) *
                                  (frames - overlap)) / 24.0,
-    })
+    }
+    if transitions is not None:
+        payload["segments"] = [
+            {"index": index, "prompt": "镜头%d" % index,
+             "transition": transitions[index - 1]}
+            for index in range(1, count + 1)]
+    return json.dumps(payload)
 
 
-def _detail_settings(enabled=True, resolution="928P", model=None):
+def _detail_settings(enabled=True, resolution="928P", model=None,
+                     continuous_sigma=False, upscale_method="bicubic",
+                     mode=None, vsr_enhance=False):
+    extra = {"二采模型": model}
+    if mode is not None:
+        extra["mode"] = mode
     return detail.H3DetailSettings().build(
         enabled, resolution, 1664, 928, 4, 0.2, "beta",
-        "res_multistep", "bicubic", 4, **{"二采模型": model})[0]
+        "res_multistep", upscale_method, 4,
+        continuous_sigma=continuous_sigma, vsr_enhance=vsr_enhance,
+        **extra)[0]
 
 
 def _expand(task, ref_video=None, overlap=22,
-            model=None, sampler=None,
+            detail_refinement=native.DETAIL_NATIVE, model=None, sampler=None,
             steps=8, scheduler="simple", denoise=1.0,
-            drift_method="off", drift_strength=0.0, detail_settings=None):
+            drift_method="off", drift_strength=0.0, detail_settings=None,
+            transitions=None):
     h3 = SimpleNamespace(video_vae=object(), audio_vae=object())
-    return legacy.H3LongVideo().run(
+    return native.H3LongVideo().run(
         h3=h3,
         model=model if model is not None else object(),
         sampler=sampler if sampler is not None else object(),
-        plan_json=_plan(overlap=overlap),
+        plan_json=_plan(overlap=overlap, transitions=transitions),
         task_mode=task,
         resolution="480P",
         aspect_ratio="16:9",
@@ -319,6 +390,7 @@ def _expand(task, ref_video=None, overlap=22,
         drift_method=drift_method,
         drift_strength=drift_strength,
         ref_image_size="匹配生成分辨率",
+        detail_refinement=detail_refinement,
         **{"二采设置": detail_settings},
         save_segments=False,
         ref_video=ref_video,
@@ -353,6 +425,8 @@ def test_dynamic_expansion():
           "first segment audio was not normalised to video duration")
     check(not any("MotionContext" in kind for kind in kinds),
           "third-party MotionContext remains in expansion")
+    check("ExtendIntermediateSigmas" not in kinds,
+          "detail refinement must remain off by default")
     check("MiniMaxH3SigmaShift" not in kinds,
           "official H3 AV sigma shifts must not be rewritten")
     check("SplitSigmasDenoise" not in kinds,
@@ -368,9 +442,143 @@ def test_dynamic_expansion():
         check(isinstance(link, list), "action-transfer clip was dropped")
         check(graph[link[0]]["class_type"] == "ImageFromBatch",
               "H3Condition ref_video does not come from per-segment slice")
+        check(node["inputs"].get("ref_video_weight_mode") == "auto",
+              "old action plans no longer default their direct video to automatic weight")
 
 
-def test_second_pass_detail_pipeline():
+def test_cut_boundary_skips_previous_motion_context():
+    graph = _expand(
+        legacy.TASK_FRESH, transitions=["开场", "切镜"])
+    kinds = [node["class_type"] for node in graph.values()]
+    check(kinds.count("H3AnchorContext") == 0,
+          "a cut boundary still anchors the previous segment latent")
+    trims = [node for node in graph.values()
+             if node["class_type"] == "H3AnchorTrim"]
+    check(len(trims) == 2 and all(
+        node["inputs"]["trim_frames"] == 0 for node in trims),
+        "a cut boundary still discards an overlap window")
+    conditions = [(node_id, node) for node_id, node in graph.items()
+                  if node["class_type"] == "H3Condition"]
+    second_sampler = next(
+        node for node in graph.values()
+        if node["class_type"] == "H3SamplerAdvanced"
+        and node["inputs"].get("segment_index") == 2
+        and node["inputs"].get("pass_label") == "sample1")
+    check(second_sampler["inputs"]["latent_image"] == [conditions[1][0], 1],
+          "cut segment did not start from its own H3Condition latent")
+
+    detail_graph = _expand(
+        legacy.TASK_FRESH,
+        transitions=["开场", "切镜"],
+        detail_settings=_detail_settings(model=object()))
+    check(not any(node["class_type"] == "H3AnchorContext"
+                  for node in detail_graph.values()),
+          "a cut boundary still copied the previous second-pass latent")
+
+
+def test_low_sigma_refinement():
+    graph = _expand(
+        legacy.TASK_FRESH,
+        detail_refinement=native.DETAIL_BALANCED)
+    refiners = [node for node in graph.values()
+                if node["class_type"] == "ExtendIntermediateSigmas"]
+    samplers = [node for node in graph.values()
+                if node["class_type"] == "H3SamplerAdvanced"]
+    check(len(refiners) == 2, "each segment needs one sigma refiner")
+    check(len(samplers) == 2, "refinement must not duplicate the sampler")
+    for node in refiners:
+        inputs = node["inputs"]
+        check(inputs["steps"] == 2, "balanced subdivision changed")
+        check(inputs["start_at_sigma"] == 0.8, "wrong refine start")
+        check(inputs["end_at_sigma"] == 0.0, "wrong refine end")
+        check(inputs["spacing"] == "cosine", "wrong refine spacing")
+    for node in samplers:
+        link = node["inputs"]["sigmas"]
+        check(graph[link[0]]["class_type"] == "ExtendIntermediateSigmas",
+              "sampler bypassed the refined sigma schedule")
+    kinds = [node["class_type"] for node in graph.values()]
+    check("MiniMaxH3SigmaShift" not in kinds, "H3 shift was overridden")
+    check("SplitSigmasDenoise" not in kinds, "schedule was split in two")
+    strong = native.detail_refinement_params(native.DETAIL_STRONG)
+    check(strong == {"steps": 3, "start_at_sigma": 0.8,
+                     "end_at_sigma": 0.0, "spacing": "cosine"},
+          "strong refinement profile changed")
+
+
+def test_continuous_sigma_second_pass_graph():
+    settings = _detail_settings(
+        model=None, continuous_sigma=True,
+        upscale_method="neural_3d (神经3D Latent放大·推荐)")
+    graph = _expand(legacy.TASK_FRESH, detail_settings=settings)
+    samplers = [node for node in graph.values()
+                if node["class_type"] == "H3SamplerAdvanced"]
+    first = [node for node in samplers
+             if node["inputs"].get("pass_label") == "sample1"]
+    second = [node for node in samplers
+              if node["inputs"].get("pass_label") == "sample2"]
+    check(len(first) == 2 and len(second) == 2,
+          "continuous Sigma did not create exactly two linked halves per segment")
+    check(all(node["inputs"].get("return_denoised") is True for node in first),
+          "continuous first half did not expose its clean x0 preview")
+    identities = [node for node in graph.values()
+                  if node["class_type"] == "H3LatentIdentity"]
+    check(len(identities) == 3,
+          "continuous first-pass x0 or compact inter-segment tail lost its latent contract")
+    schedulers = [node for node in graph.values()
+                  if node["class_type"] == "BasicScheduler"]
+    check(len(schedulers) == 2 and all(
+        node["inputs"]["steps"] == 12 for node in schedulers),
+        "continuous Sigma did not build one combined 8+4 schedule")
+    check(sum(node["class_type"] == "SplitSigmas"
+              for node in graph.values()) == 2,
+          "combined schedules were not split at the first-pass boundary")
+    check(not any(node["class_type"] == "KSamplerSelect"
+                  for node in graph.values()),
+          "continuous tail still instantiated an independent second sampler")
+    for node in second:
+        noise_link = node["inputs"]["noise"]
+        sigma_link = node["inputs"]["sigmas"]
+        check(graph[noise_link[0]]["class_type"] == "DisableNoise",
+              "continuous tail injected random noise a second time")
+        check(graph[sigma_link[0]]["class_type"] == "SplitSigmas"
+              and sigma_link[1] == 1,
+              "continuous tail did not receive the low-sigma half")
+
+
+def test_hybrid_bundle_reuses_one_checkpoint_for_both_families():
+    import nodes as comfy_nodes
+
+    calls = []
+    original_loader = comfy_nodes.NODE_CLASS_MAPPINGS.get("UNETLoader")
+    original_headroom = core_runtime._ensure_aimdo_hostbuf_headroom
+
+    class FakeLoader:
+        def load_unet(self, name, dtype):
+            calls.append((name, dtype))
+            return (object(),)
+
+    comfy_nodes.NODE_CLASS_MAPPINGS["UNETLoader"] = FakeLoader
+    core_runtime._ensure_aimdo_hostbuf_headroom = lambda: True
+    try:
+        bundle = core_runtime.H3Bundle(
+            object(), object(), object(),
+            {"ref2va": "ref.safetensors", "fl2va": "fl.safetensors",
+             "hybrid": "hybrid.safetensors"},
+            model_layout=core_runtime.MODEL_LAYOUT_HYBRID)
+        ref_model = bundle.model_for("ref2va")
+        fl_model = bundle.model_for("fl2va")
+        check(ref_model is fl_model and calls == [
+            ("hybrid.safetensors", "default")],
+            "hybrid profile reloaded the same large checkpoint")
+    finally:
+        core_runtime._ensure_aimdo_hostbuf_headroom = original_headroom
+        if original_loader is None:
+            comfy_nodes.NODE_CLASS_MAPPINGS.pop("UNETLoader", None)
+        else:
+            comfy_nodes.NODE_CLASS_MAPPINGS["UNETLoader"] = original_loader
+
+
+def test_second_pass_detail_refinement():
     check(any("nvidia_rtx_vsr" in str(m) for m in detail.DETAIL_UPSCALE_METHODS),
           "NVIDIA RTX VSR option was removed from the detail pass")
     settings = _detail_settings(True, "832P", object())
@@ -441,6 +649,52 @@ def test_second_pass_detail_pipeline():
                             and node["inputs"].get("pass_label") == "sample2"]
     check(len(second_pass_samplers) == 2,
           "long-video detail conditioning did not reach one sampler per segment")
+    barriers = [(node_id, node) for node_id, node in graph.items()
+                if node["class_type"] == "H3SegmentMemoryBarrier"]
+    check(len(barriers) == 1,
+          "two-segment detail generation needs exactly one inter-segment memory barrier")
+    collector = next(node for node in graph.values()
+                     if node["class_type"] == "H3SegmentCollector")
+    barrier_id = barriers[0][0]
+    check(collector["inputs"]["images_1"] == [barrier_id, 0]
+          and collector["inputs"]["audios_1"] == [barrier_id, 1],
+          "the first refined segment can bypass the cleanup barrier")
+    check(barriers[0][1]["inputs"].get("keep_model") is not None,
+          "inter-segment cleanup no longer identifies the pass-1 host cache")
+    prepares = sorted(
+        ((node_id, node) for node_id, node in graph.items()
+         if node["class_type"] == "H3PrepareSignal"),
+        key=lambda item: item[1]["inputs"]["segment_index"])
+    check(prepares[1][1]["inputs"]["h3"] == [barrier_id, 2],
+          "segment 2 can start before the segment-1 memory barrier finishes")
+    check(barriers[0][1]["inputs"].get("detail_latent") is not None,
+          "the first full-resolution detail latent is kept alive across segments")
+    check(barriers[0][1]["inputs"].get("pass1_latent") is not None,
+          "the full first-pass latent is still retained across segments")
+    check(sum(node["class_type"] == "H3LatentOverlapSeed"
+              for node in graph.values()) == 1,
+          "pass 2 still duplicates the previous high-resolution tail as condition tokens")
+    detail_seed = next(node for node in graph.values()
+                       if node["class_type"] == "H3LatentOverlapSeed")
+    check(detail_seed["inputs"]["context_latent"] == [barrier_id, 3],
+          "segment 2 did not consume the compact CPU tail from the memory barrier")
+
+    cut_graph = _expand(
+        legacy.TASK_FRESH,
+        detail_settings=_detail_settings(True, "928P", object()),
+        transitions=["开场", "切镜"])
+    cut_barrier_id = next(
+        node_id for node_id, node in cut_graph.items()
+        if node["class_type"] == "H3SegmentMemoryBarrier")
+    cut_prepares = sorted(
+        (node for node in cut_graph.values()
+         if node["class_type"] == "H3PrepareSignal"),
+        key=lambda node: node["inputs"]["segment_index"])
+    check(cut_prepares[1]["inputs"]["h3"] == [cut_barrier_id, 2],
+          "a cut segment bypasses previous pass-2 cleanup")
+    check(not any(node["class_type"] == "H3LatentOverlapSeed"
+                  for node in cut_graph.values()),
+          "a cut segment incorrectly retained the previous detail latent")
 
     graph = _expand(
         legacy.TASK_FRESH,
@@ -451,9 +705,9 @@ def test_second_pass_detail_pipeline():
     if "context_latent" in anchor["inputs"]:
         context_link = anchor["inputs"]["context_latent"]
         context_source = graph[context_link[0]]
-        check(context_source["class_type"] == "H3SamplerAdvanced"
-              and context_source["inputs"].get("pass_label") == "sample1",
-              "refined high-resolution latent leaked into low-resolution anchors")
+        check(context_source["class_type"] == "H3LatentIdentity"
+              and context_source["inputs"].get("samples") is not None,
+              "segment 2 did not consume the compact first-pass latent tail")
     else:
         context_link = anchor["inputs"]["context_frames"]
         context_trim = graph[context_link[0]]
@@ -568,6 +822,14 @@ def test_turbo_schedule_contract():
           "Turbo model still rejected or replaced manual NFE")
     must_fail("scheduler=simple", scheduler="beta")
     must_fail("denoise=1.0", denoise=0.8)
+    graph = _expand(
+        legacy.TASK_FRESH, model=result[0],
+        sampler=SimpleNamespace(sampler_function=sample_euler),
+        detail_refinement=native.DETAIL_BALANCED)
+    check(not any(node["class_type"] == "ExtendIntermediateSigmas"
+                  for node in graph.values()),
+          "Turbo did not automatically suppress low-sigma refinement")
+
     def sample_res_multistep(*args, **kwargs):
         return None
 
@@ -607,7 +869,7 @@ def test_direct_reference_condition():
         h3 = SimpleNamespace(clip=object(), video_vae=object(),
                              audio_vae=object())
         video = torch.zeros(5, 2, 2, 3)
-        result = core.H3Condition().build(
+        result = core_runtime.H3Condition().build(
             h3=h3,
             prompt="参考@视频1的动作",
             resolution="自定义",
@@ -627,19 +889,206 @@ def test_direct_reference_condition():
         core._core = old_core
 
 
+def test_action_reference_weights_follow_token_budget_and_attach_to_blocks():
+    class FakeCore:
+        REF_IMAGE_SHORT_EDGE = 2048
+
+        @staticmethod
+        def adapt_canvas(width, height):
+            return width, height
+
+        @staticmethod
+        def video_latent_t(frames):
+            return (int(frames) + 3) // 4
+
+    picture = SimpleNamespace(shape=(1, 1024, 1024, 3))
+    action = SimpleNamespace(shape=(192, 640, 1152, 3))
+    plan = core_runtime.reference_weight_plan(
+        FakeCore,
+        {"ref_image_1": picture},
+        {"ref_video_1": action},
+        {},
+        {
+            "image": {"ref_image_1": ("auto", 1.0)},
+            "video": {"ref_video_1": ("auto", 1.0)},
+            "audio": {},
+        },
+        192,
+    )
+    by_name = {entry["name"]: entry for entry in plan}
+    check(1.0 < by_name["ref_image_1"]["weight"] <= 2.25,
+          "automatic still-image weight did not compensate its smaller token budget")
+    check(by_name["ref_video_1"]["weight"] == 1.0,
+          "action video must remain the automatic 1.0 baseline")
+    fallback = core_runtime.reference_weight_plan(
+        FakeCore, {}, {"ref_video_1": action}, {},
+        {"image": {}, "video": {}, "audio": {}}, 192)
+    check(fallback[0]["mode"] == "auto" and fallback[0]["weight"] == 1.0,
+          "a legacy direct action video without policy no longer defaults to automatic")
+
+    conditioning = [["text", {"minimax_refs": [
+        {"kind": "image"}, {"kind": "video", "ref_audio_t": 0},
+    ]}]]
+    weighted = core_runtime.apply_reference_weight_plan(conditioning, plan)
+    refs = weighted[0][1]["minimax_refs"]
+    check(refs[0]["reference_weight"] == by_name["ref_image_1"]["weight"],
+          "resolved image weight was not attached to the official ref block")
+    check(refs[1]["reference_weight"] == 1.0,
+          "resolved video baseline was not attached to the official ref block")
+    check("reference_weight" not in conditioning[0][1]["minimax_refs"][0],
+          "weight attachment mutated the original conditioning metadata")
+
+
+def test_packed_layout_tracks_exact_weighted_reference_rows():
+    check(compat.ensure_anchors(), "anchor patch failed")
+    from comfy.ldm.minimax.model import PackedLayout
+
+    refs = [
+        {"kind": "image", "latent_h": 8, "latent_w": 12,
+         "reference_weight": 1.5},
+        {"kind": "video_audio", "latent_t": 3,
+         "latent_h": 8, "latent_w": 12, "ref_audio_t": 2,
+         "reference_weight": 0.75},
+    ]
+    layout = PackedLayout(
+        text_len=4, latent_t=2, latent_h=8, latent_w=12,
+        audio_t=2, refs=refs)
+    # Image: (8/2)*(12/2)=24 rows. Video audio: 2*2=4 rows.
+    # Video visual: 3*24=72 rows. All ranges start after 4 text rows.
+    check(layout.reference_value_scales == (
+        (4, 28, 1.5), (28, 32, 0.75), (32, 104, 0.75)),
+        "PackedLayout reference weight ranges no longer match packed ref rows")
+    plain = PackedLayout(
+        text_len=4, latent_t=2, latent_h=8, latent_w=12, audio_t=2,
+        refs=[{"kind": "image", "latent_h": 8, "latent_w": 12}])
+    check(plain.reference_value_scales == (),
+          "unweighted references must not produce attention scales")
+
+
+def test_sampler_bridges_layout_scales_into_transformer_options():
+    import comfy.patcher_extension as patcher_extension
+
+    progress = importlib.import_module("ComfyUI-MiniMaxH3-Myang.progress")
+    seen = {}
+
+    class FakePatcher:
+        def __init__(self):
+            self.wrappers = {}
+
+        def add_wrapper_with_key(self, wrapper_type, key, wrapper):
+            self.wrappers.setdefault(wrapper_type, {}).setdefault(key, []).append(wrapper)
+
+        def get_wrappers(self, wrapper_type, key):
+            return self.wrappers.get(wrapper_type, {}).get(key, [])
+
+    patcher = FakePatcher()
+    check(progress._install_reference_weight_bridge(patcher),
+          "reference weight bridge did not install")
+    check(progress._install_reference_weight_bridge(patcher),
+          "second install must be idempotent")
+    wrappers = patcher.get_wrappers(
+        patcher_extension.WrappersMP.DIFFUSION_MODEL,
+        progress.REFERENCE_WEIGHT_WRAPPER_KEY)
+    check(len(wrappers) == 1, "bridge wrapper registered more than once")
+
+    def original(x, timestep, context, transformer_options={},
+                 minimax_payload=None):
+        seen["scales"] = transformer_options.get("minimax_reference_value_scales")
+        return "ok"
+
+    executor = patcher_extension.WrapperExecutor.new_executor(original, wrappers)
+    layout = SimpleNamespace(reference_value_scales=((4, 28, 1.5),))
+    options = {}
+    result = executor.execute(
+        "x", "t", "ctx", transformer_options=options,
+        minimax_payload={"layout": layout})
+    check(result == "ok" and seen["scales"] == ((4, 28, 1.5),),
+          "layout scales did not reach transformer_options")
+    options = {"minimax_reference_value_scales": ((0, 1, 2.0),)}
+    executor.execute(
+        "x", "t", "ctx", transformer_options=options,
+        minimax_payload={"layout": SimpleNamespace(reference_value_scales=())})
+    check(seen["scales"] is None,
+          "stale scales survived a layout without weighted references")
+
+
+def test_same_resolution_second_pass_can_run_vsr_at_native_size():
+    """同分辨率二采 has no resize step, so VSR only fits after the decode."""
+    same_res = _detail_settings(
+        True, "480P", object(), mode=detail.DETAIL_MODE_REFINE,
+        vsr_enhance=True)
+    graph = _expand(legacy.TASK_FRESH, detail_settings=same_res)
+    kinds = [node["class_type"] for node in graph.values()]
+    check(kinds.count("H3VsrEnhance") == 2,
+          "1:1 VSR enhancement did not run once per refined segment")
+    check("H3LatentUpscale" not in kinds,
+          "同分辨率二采 unexpectedly built an upscale node")
+    decoders = {node_id for node_id, node in graph.items()
+                if node["class_type"] == "VAEDecode"}
+    enhancers = {node_id for node_id, node in graph.items()
+                 if node["class_type"] == "H3VsrEnhance"}
+    for node_id in enhancers:
+        source = graph[node_id]["inputs"]["images"]
+        check(isinstance(source, list) and source[0] in decoders,
+              "VSR enhancement is not reading the pass-2 decode")
+    refined = [node for node in graph.values()
+               if node["class_type"] == "H3ProgressSignal"
+               and node["inputs"].get("stage") == "refined"]
+    check(len(refined) == 2
+          and all(signal["inputs"]["images"][0] in enhancers
+                  for signal in refined),
+          "the refined segment bypassed the VSR enhancement")
+
+
+def test_vsr_enhance_stays_off_unless_asked_and_never_doubles_up():
+    off = _expand(legacy.TASK_FRESH, detail_settings=_detail_settings(
+        True, "480P", object(), mode=detail.DETAIL_MODE_REFINE))
+    check("H3VsrEnhance" not in [node["class_type"] for node in off.values()],
+          "VSR enhancement ran while its toggle was off")
+    # 仅放大 already offers VSR as the upscale method; a second pass over the
+    # same frames would pay the subprocess and disk round trip twice.
+    upscale_only = _expand(legacy.TASK_FRESH, detail_settings=_detail_settings(
+        True, "928P", object(), mode=detail.DETAIL_MODE_UPSCALE_ONLY,
+        upscale_method="nvidia_rtx_vsr (NVIDIA RTX 视频超分·实验)",
+        vsr_enhance=True))
+    kinds = [node["class_type"] for node in upscale_only.values()]
+    check("H3VsrEnhance" not in kinds and kinds.count("H3PixelUpscale") == 2,
+          "仅放大 should upscale with VSR directly, not add a second VSR pass")
+    # 放大 + 二采 also reaches VSR through 放大方式. The panel hides the toggle
+    # there, but a saved workflow can still carry a stale ``true``, so the
+    # backend has to refuse on the mode rather than on "does this mode sample".
+    upscale_refine = _expand(legacy.TASK_FRESH, detail_settings=_detail_settings(
+        True, "928P", object(), mode=detail.DETAIL_MODE_UPSCALE_REFINE,
+        upscale_method="nvidia_rtx_vsr (NVIDIA RTX 视频超分·实验)",
+        vsr_enhance=True))
+    check("H3VsrEnhance" not in [node["class_type"]
+                                 for node in upscale_refine.values()],
+          "a stale VSR toggle leaked a second VSR pass into 放大 + 二采")
+
+
 if __name__ == "__main__":
     tests = [
         test_registration_and_schema,
         test_layout_and_payload,
         test_temporal_windows_and_audio_grid,
         test_overlap_latent_is_seeded_and_excluded_from_noise,
+        test_tail_motion_context_is_phase_safe_at_exact_io,
         test_seam_uses_matching_audio_window,
         test_aimdo_headroom_does_not_raise_pin_budget,
         test_trim,
         test_dynamic_expansion,
-        test_second_pass_detail_pipeline,
+        test_cut_boundary_skips_previous_motion_context,
+        test_low_sigma_refinement,
+        test_continuous_sigma_second_pass_graph,
+        test_hybrid_bundle_reuses_one_checkpoint_for_both_families,
+        test_second_pass_detail_refinement,
         test_turbo_schedule_contract,
         test_direct_reference_condition,
+        test_action_reference_weights_follow_token_budget_and_attach_to_blocks,
+        test_packed_layout_tracks_exact_weighted_reference_rows,
+        test_sampler_bridges_layout_scales_into_transformer_options,
+        test_same_resolution_second_pass_can_run_vsr_at_native_size,
+        test_vsr_enhance_stays_off_unless_asked_and_never_doubles_up,
     ]
     for test in tests:
         test()

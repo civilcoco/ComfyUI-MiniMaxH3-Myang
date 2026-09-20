@@ -2,10 +2,6 @@
 
 SPDX-License-Identifier: Apache-2.0
 
-Copyright 2026 ComfyUI-Bernini Contributors
-Copyright (C) 2026 Myang
-Modified by Myang on 2026-08-26.
-
 This is an in-package adaptation of the Apache-2.0 implementation in
 AIMixer/ComfyUI_MiniMaxH3_Director (audited commit
 ``a267324a9f88141ff4e4b0e8c1a6ed90b4e45db7``).  It consumes the Apache-2.0
@@ -311,25 +307,65 @@ def _load_model(name: str, dtype: torch.dtype) -> nn.Module:
     return model
 
 
+def _blend_ramp(span: int, overlap: int, device, dtype) -> torch.Tensor:
+    """Cross-fade weights: flat across the core, tapering to zero at both ends."""
+    ramp = torch.ones(span, device=device, dtype=dtype)
+    taper = min(int(overlap), span // 2)
+    if taper > 0:
+        edge = torch.arange(
+            1, taper + 1, device=device, dtype=dtype) / (taper + 1)
+        ramp[:taper] = edge
+        ramp[span - taper:] = edge.flip(0)
+    return ramp.view(1, 1, span, 1, 1)
+
+
 def _forward_bounded(model, tensor, scale, target_h, target_w,
                      chunk_steps: int, overlap: int = 4):
-    """Run temporal windows with context on both sides and keep only each core."""
+    """Blend overlapping temporal windows instead of butt-joining their cores.
+
+    The old behaviour ran each window with context on both sides and then hard
+    cropped the core.  Two neighbouring cores are produced from different
+    receptive-field content, so every chunk boundary carried a visible pulse --
+    at the default 16-step chunk that is one flicker roughly every 2.7 seconds
+    of output, which reads as "the second pass is worse than the first".
+
+    Two fixes, both matching upstream: replicate the first/last step so the edge
+    windows see as much context as the interior ones, and cross-fade the overlap
+    region rather than cutting it.  ``chunk_steps`` <= 0 runs the whole clip in
+    one full-context pass, which has no seams at all.
+    """
     total = int(tensor.shape[2])
-    chunk_steps = max(1, int(chunk_steps))
-    if total <= chunk_steps:
+    chunk_steps = int(chunk_steps)
+    if chunk_steps <= 0 or total <= chunk_steps:
         return model(tensor, scale, (total, target_h, target_w))
-    outputs = []
+
+    overlap = max(1, min(int(overlap), chunk_steps))
+    padded = torch.cat((
+        tensor[:, :, :1].expand(-1, -1, overlap, -1, -1),
+        tensor,
+        tensor[:, :, -1:].expand(-1, -1, overlap, -1, -1)), dim=2)
+
+    accumulated = None
+    weights = None
     for core_start in range(0, total, chunk_steps):
         core_stop = min(total, core_start + chunk_steps)
-        window_start = max(0, core_start - overlap)
-        window_stop = min(total, core_stop + overlap)
-        window = tensor[:, :, window_start:window_stop]
-        result = model(
-            window, scale,
-            (int(window.shape[2]), target_h, target_w))
-        left = core_start - window_start
-        outputs.append(result[:, :, left:left + (core_stop - core_start)])
-    return torch.cat(outputs, dim=2)
+        window = padded[:, :, core_start:core_stop + 2 * overlap]
+        span = int(window.shape[2])
+        result = model(window, scale, (span, target_h, target_w))
+        if accumulated is None:
+            accumulated = torch.zeros(
+                (int(result.shape[0]), int(result.shape[1]),
+                 total + 2 * overlap, target_h, target_w),
+                device=result.device, dtype=torch.float32)
+            weights = torch.zeros(
+                (1, 1, total + 2 * overlap, 1, 1),
+                device=result.device, dtype=torch.float32)
+        ramp = _blend_ramp(span, overlap, result.device, torch.float32)
+        accumulated[:, :, core_start:core_start + span] += (
+            result.to(torch.float32) * ramp)
+        weights[:, :, core_start:core_start + span] += ramp
+    blended = accumulated / weights.clamp_min(1e-6)
+    return blended[:, :, overlap:overlap + total].to(dtype=tensor.dtype)
 
 
 def upscale_video_latent(video_latent: torch.Tensor, target_width: int,
@@ -373,7 +409,8 @@ def upscale_video_latent(video_latent: torch.Tensor, target_width: int,
         if device.type == "cuda":
             torch.cuda.empty_cache()
     logger.info(
-        "H3-Myang: 神经3D Latent %dx%d -> %dx%d，T=%d，chunk=%d，%s",
+        "H3-Myang: 神经3D Latent %dx%d -> %dx%d，T=%d，chunk=%s，%s",
         source_w, source_h, target_w, target_h,
-        int(video_latent.shape[2]), int(chunk_steps), precision)
+        int(video_latent.shape[2]),
+        "全上下文" if int(chunk_steps) <= 0 else int(chunk_steps), precision)
     return output
